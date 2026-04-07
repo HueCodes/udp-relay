@@ -130,6 +130,7 @@ type StateUpdate struct {
 // UpdateType categorizes state updates.
 type UpdateType int
 
+// State update types for event-driven notifications.
 const (
 	UpdateTypeNew        UpdateType = iota // New drone registered
 	UpdateTypeTelemetry                    // Regular telemetry update

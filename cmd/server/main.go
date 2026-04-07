@@ -182,34 +182,34 @@ func registerExpandedHealth(
 		var memStats runtime.MemStats
 		runtime.ReadMemStats(&memStats)
 
-		resp := ExpandedHealthResponse{
+		resp := expandedHealthResponse{
 			Status:    "ok",
 			Version:   version,
 			Timestamp: time.Now().UnixMilli(),
 			Uptime:    time.Since(startTime).Seconds(),
-			Components: ComponentHealth{
-				UDP: UDPHealth{
+			Components: componentHealth{
+				UDP: udpHealth{
 					PacketsReceived: listenerStats.PacketsReceived,
 					PacketsDropped:  listenerStats.PacketsDropped,
 					ParseErrors:     listenerStats.ParseErrors,
 				},
-				Drones: DroneHealth{
+				Drones: droneHealth{
 					Total:     stats.TotalDrones,
 					Connected: stats.ConnectedDrones,
 					Armed:     stats.ArmedDrones,
 					Messages:  stats.TotalMessages,
 				},
-				PubSub: PubSubHealth{
+				PubSub: pubSubHealth{
 					Subscribers:     hubStats.Subscribers,
 					EventsReceived:  hubStats.EventsReceived,
 					EventsBroadcast: hubStats.EventsBroadcast,
 					EventsDropped:   hubStats.EventsDropped,
 				},
-				WebSocket: WSHealth{
+				WebSocket: wsHealth{
 					Clients: ws.ClientCount(),
 				},
 			},
-			System: SystemHealth{
+			System: systemHealth{
 				Goroutines:     runtime.NumGoroutine(),
 				HeapAllocMB:    float64(memStats.HeapAlloc) / (1024 * 1024),
 				TelemetryChanUtil: float64(len(telemetryChan)) / float64(cap(telemetryChan)),
@@ -296,47 +296,47 @@ func configureLogger(level, format string) *slog.Logger {
 
 // Expanded health response types
 
-type ExpandedHealthResponse struct {
+type expandedHealthResponse struct {
 	Status     string          `json:"status"`
 	Version    string          `json:"version"`
 	Timestamp  int64           `json:"timestamp"`
 	Uptime     float64         `json:"uptime_seconds"`
-	Components ComponentHealth `json:"components"`
-	System     SystemHealth    `json:"system"`
+	Components componentHealth `json:"components"`
+	System     systemHealth    `json:"system"`
 }
 
-type ComponentHealth struct {
-	UDP       UDPHealth    `json:"udp"`
-	Drones    DroneHealth  `json:"drones"`
-	PubSub    PubSubHealth `json:"pubsub"`
-	WebSocket WSHealth     `json:"websocket"`
+type componentHealth struct {
+	UDP       udpHealth    `json:"udp"`
+	Drones    droneHealth  `json:"drones"`
+	PubSub    pubSubHealth `json:"pubsub"`
+	WebSocket wsHealth     `json:"websocket"`
 }
 
-type UDPHealth struct {
+type udpHealth struct {
 	PacketsReceived uint64 `json:"packets_received"`
 	PacketsDropped  uint64 `json:"packets_dropped"`
 	ParseErrors     uint64 `json:"parse_errors"`
 }
 
-type DroneHealth struct {
+type droneHealth struct {
 	Total     int    `json:"total"`
 	Connected int    `json:"connected"`
 	Armed     int    `json:"armed"`
 	Messages  uint64 `json:"messages"`
 }
 
-type PubSubHealth struct {
+type pubSubHealth struct {
 	Subscribers     int    `json:"subscribers"`
 	EventsReceived  uint64 `json:"events_received"`
 	EventsBroadcast uint64 `json:"events_broadcast"`
 	EventsDropped   uint64 `json:"events_dropped"`
 }
 
-type WSHealth struct {
+type wsHealth struct {
 	Clients int `json:"clients"`
 }
 
-type SystemHealth struct {
+type systemHealth struct {
 	Goroutines        int     `json:"goroutines"`
 	HeapAllocMB       float64 `json:"heap_alloc_mb"`
 	TelemetryChanUtil float64 `json:"telemetry_chan_utilization"`

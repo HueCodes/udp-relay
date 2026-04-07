@@ -122,7 +122,7 @@ func (l *UDPListener) Start(ctx context.Context) error {
 
 	// Graceful shutdown
 	l.logger.Info("shutting down UDP listener")
-	l.conn.Close()
+	_ = l.conn.Close()
 	close(packetChan)
 	l.wg.Wait()
 	l.workerPool.Wait()

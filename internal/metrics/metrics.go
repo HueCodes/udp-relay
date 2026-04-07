@@ -6,6 +6,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Prometheus metrics for the drone telemetry pipeline.
 var (
 	UDPPacketsReceived = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "udp_packets_received_total",

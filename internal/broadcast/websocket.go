@@ -324,7 +324,7 @@ func (ws *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Reques
 	delete(ws.clients, id)
 	ws.mu.Unlock()
 
-	conn.Close(websocket.StatusNormalClosure, "")
+	_ = conn.Close(websocket.StatusNormalClosure, "")
 	ws.logger.Info("websocket client disconnected",
 		"client_id", id,
 		"total_clients", ws.ClientCount())

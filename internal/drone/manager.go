@@ -117,7 +117,7 @@ func (m *Manager) ProcessEvent(event *protocol.TelemetryEvent) {
 	state.MessageCount++
 
 	// Update type-specific state
-	var updateType UpdateType = UpdateTypeTelemetry
+	updateType := UpdateTypeTelemetry
 	previouslyArmed := state.IsArmed
 
 	switch payload := event.Payload.(type) {

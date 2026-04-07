@@ -37,6 +37,7 @@ const (
 // MAVType represents the type of vehicle
 type MAVType uint8
 
+// MAVLink vehicle types.
 const (
 	MAVTypeGeneric        MAVType = 0
 	MAVTypeFixedWing      MAVType = 1
@@ -71,6 +72,7 @@ func (t MAVType) String() string {
 // MAVState represents the flight state of the vehicle
 type MAVState uint8
 
+// MAVLink flight states.
 const (
 	MAVStateUninit      MAVState = 0
 	MAVStateBoot        MAVState = 1
@@ -108,6 +110,7 @@ func (s MAVState) String() string {
 // GPSFixType represents the GPS fix quality
 type GPSFixType uint8
 
+// GPS fix quality levels.
 const (
 	GPSFixNone   GPSFixType = 0
 	GPSFix2D     GPSFixType = 2
