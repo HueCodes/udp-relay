@@ -90,6 +90,9 @@ type WebSocketConfig struct {
 
 	// Maximum message size from clients
 	MaxMessageSize int64
+
+	// Maximum concurrent WebSocket clients (0 = unlimited)
+	MaxClients int
 }
 
 // PubSubConfig contains pub/sub hub settings.
@@ -129,6 +132,7 @@ func Default() Config {
 			BroadcastInterval: 100 * time.Millisecond, // 10 Hz updates
 			WriteTimeout:      10 * time.Second,
 			MaxMessageSize:    4096,
+			MaxClients:        100,
 		},
 		PubSub: PubSubConfig{
 			SubscriberBufferSize: 256,

@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"nhooyr.io/websocket"
+
 	"github.com/hugh/go-drone-server/internal/config"
 	"github.com/hugh/go-drone-server/internal/drone"
 	"github.com/hugh/go-drone-server/internal/pubsub"
@@ -18,31 +20,56 @@ import (
 )
 
 // WebSocketServer handles WebSocket connections for real-time telemetry.
-// This is a placeholder implementation - a production version would use
-// gorilla/websocket or nhooyr.io/websocket.
 type WebSocketServer struct {
 	cfg          config.WebSocketConfig
 	logger       *slog.Logger
 	droneManager *drone.Manager
+	hub          *pubsub.Hub
 	subscription *pubsub.Subscriber
 
 	// HTTP server
 	server *http.Server
 	mux    *http.ServeMux
 
-	// Connected clients (placeholder - would use proper WebSocket connections)
+	// Connected WebSocket clients
 	mu      sync.RWMutex
-	clients map[uint64]*client
+	clients map[uint64]*wsClient
 
 	nextID atomic.Uint64
 	done   chan struct{}
 	wg     sync.WaitGroup
 }
 
-// client represents a connected WebSocket client (placeholder).
-type client struct {
-	id       uint64
+// SubscribeMessage is sent by the client to filter updates.
+type SubscribeMessage struct {
+	// DroneIDs filters to specific drone system IDs (empty = all)
+	DroneIDs []uint8 `json:"drone_ids,omitempty"`
+	// EventTypes filters to specific update types (empty = all)
+	EventTypes []string `json:"event_types,omitempty"`
+}
+
+// wsClient represents a connected WebSocket client.
+type wsClient struct {
+	id     uint64
+	conn   *websocket.Conn
+	cancel context.CancelFunc
+
+	// Filtering
+	mu         sync.RWMutex
+	droneIDs   map[uint8]bool
+	eventTypes map[string]bool
+
+	// Outbound message queue
 	messages chan []byte
+}
+
+func (c *wsClient) matchesDrone(id uint8) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.droneIDs) == 0 {
+		return true
+	}
+	return c.droneIDs[id]
 }
 
 // NewWebSocketServer creates a new WebSocket server.
@@ -56,7 +83,8 @@ func NewWebSocketServer(
 		cfg:          cfg,
 		logger:       logger.With("component", "websocket"),
 		droneManager: droneManager,
-		clients:      make(map[uint64]*client),
+		hub:          hub,
+		clients:      make(map[uint64]*wsClient),
 		done:         make(chan struct{}),
 		mux:          http.NewServeMux(),
 	}
@@ -106,6 +134,13 @@ func (ws *WebSocketServer) Start(ctx context.Context) error {
 func (ws *WebSocketServer) Stop() {
 	close(ws.done)
 
+	// Close all client connections
+	ws.mu.Lock()
+	for _, c := range ws.clients {
+		c.cancel()
+	}
+	ws.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -115,6 +150,13 @@ func (ws *WebSocketServer) Stop() {
 
 	ws.wg.Wait()
 	ws.logger.Info("WebSocket server stopped")
+}
+
+// ClientCount returns the number of connected WebSocket clients.
+func (ws *WebSocketServer) ClientCount() int {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return len(ws.clients)
 }
 
 // broadcastLoop processes telemetry events and broadcasts to clients.
@@ -166,9 +208,8 @@ func (ws *WebSocketServer) runBroadcastLoop(ctx context.Context) (panicked bool)
 	}
 }
 
-// broadcastUpdates sends batched updates to all clients.
+// broadcastUpdates sends batched updates to all connected WebSocket clients.
 func (ws *WebSocketServer) broadcastUpdates(events []*protocol.TelemetryEvent) {
-	// Get current drone summaries
 	summaries := ws.droneManager.GetAllSummaries()
 
 	msg := BroadcastMessage{
@@ -177,7 +218,7 @@ func (ws *WebSocketServer) broadcastUpdates(events []*protocol.TelemetryEvent) {
 		Drones:    summaries,
 	}
 
-	data, err := json.Marshal(msg)
+	fullData, err := json.Marshal(msg)
 	if err != nil {
 		ws.logger.Error("failed to marshal broadcast", "error", err)
 		return
@@ -187,29 +228,172 @@ func (ws *WebSocketServer) broadcastUpdates(events []*protocol.TelemetryEvent) {
 	defer ws.mu.RUnlock()
 
 	for _, c := range ws.clients {
-		select {
-		case c.messages <- data:
-		default:
-			// Client too slow, drop message
+		// Check if client has drone filters
+		if len(c.droneIDs) > 0 {
+			filtered := make([]drone.Summary, 0, len(summaries))
+			for _, s := range summaries {
+				if c.matchesDrone(s.SystemID) {
+					filtered = append(filtered, s)
+				}
+			}
+			filteredMsg := BroadcastMessage{
+				Type:      "state_update",
+				Timestamp: msg.Timestamp,
+				Drones:    filtered,
+			}
+			data, err := json.Marshal(filteredMsg)
+			if err != nil {
+				continue
+			}
+			select {
+			case c.messages <- data:
+			default:
+			}
+		} else {
+			select {
+			case c.messages <- fullData:
+			default:
+			}
 		}
 	}
 }
 
-// handleWebSocket handles WebSocket upgrade requests.
-// This is a placeholder - actual implementation would use a WebSocket library.
+// handleWebSocket upgrades HTTP to WebSocket and manages the client lifecycle.
 func (ws *WebSocketServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Placeholder: In production, this would:
-	// 1. Upgrade connection to WebSocket
-	// 2. Register client
-	// 3. Handle incoming messages
-	// 4. Send outgoing broadcasts
+	// Check max clients
+	ws.mu.RLock()
+	count := len(ws.clients)
+	ws.mu.RUnlock()
+	if ws.cfg.MaxClients > 0 && count >= ws.cfg.MaxClients {
+		http.Error(w, "max clients reached", http.StatusServiceUnavailable)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	json.NewEncoder(w).Encode(map[string]string{
-		"error":   "WebSocket not implemented",
-		"message": "Use /api/drones for REST polling or implement WebSocket upgrade",
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
 	})
+	if err != nil {
+		ws.logger.Warn("websocket accept failed", "error", err)
+		return
+	}
+
+	clientCtx, cancel := context.WithCancel(r.Context())
+	id := ws.nextID.Add(1)
+
+	c := &wsClient{
+		id:       id,
+		conn:     conn,
+		cancel:   cancel,
+		messages: make(chan []byte, 64),
+	}
+
+	ws.mu.Lock()
+	ws.clients[id] = c
+	ws.mu.Unlock()
+
+	ws.logger.Info("websocket client connected",
+		"client_id", id,
+		"remote", r.RemoteAddr,
+		"total_clients", ws.ClientCount())
+
+	// Read loop: handle incoming subscribe messages
+	ws.wg.Add(1)
+	go ws.clientReadLoop(clientCtx, c)
+
+	// Write loop: send broadcasts to client
+	ws.wg.Add(1)
+	go ws.clientWriteLoop(clientCtx, c)
+
+	// Wait for client disconnect
+	<-clientCtx.Done()
+
+	// Cleanup
+	ws.mu.Lock()
+	delete(ws.clients, id)
+	ws.mu.Unlock()
+
+	conn.Close(websocket.StatusNormalClosure, "")
+	ws.logger.Info("websocket client disconnected",
+		"client_id", id,
+		"total_clients", ws.ClientCount())
+}
+
+// clientReadLoop handles incoming messages from a WebSocket client.
+func (ws *WebSocketServer) clientReadLoop(ctx context.Context, c *wsClient) {
+	defer ws.wg.Done()
+	defer c.cancel()
+
+	for {
+		_, data, err := c.conn.Read(ctx)
+		if err != nil {
+			return
+		}
+
+		var sub SubscribeMessage
+		if err := json.Unmarshal(data, &sub); err != nil {
+			ws.logger.Debug("invalid subscribe message", "client_id", c.id, "error", err)
+			continue
+		}
+
+		c.mu.Lock()
+		if len(sub.DroneIDs) > 0 {
+			c.droneIDs = make(map[uint8]bool, len(sub.DroneIDs))
+			for _, id := range sub.DroneIDs {
+				c.droneIDs[id] = true
+			}
+		} else {
+			c.droneIDs = nil
+		}
+		if len(sub.EventTypes) > 0 {
+			c.eventTypes = make(map[string]bool, len(sub.EventTypes))
+			for _, t := range sub.EventTypes {
+				c.eventTypes[t] = true
+			}
+		} else {
+			c.eventTypes = nil
+		}
+		c.mu.Unlock()
+
+		ws.logger.Debug("client updated subscription",
+			"client_id", c.id,
+			"drone_ids", sub.DroneIDs,
+			"event_types", sub.EventTypes)
+	}
+}
+
+// clientWriteLoop sends queued messages to a WebSocket client.
+func (ws *WebSocketServer) clientWriteLoop(ctx context.Context, c *wsClient) {
+	defer ws.wg.Done()
+	defer c.cancel()
+
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case msg, ok := <-c.messages:
+			if !ok {
+				return
+			}
+			writeCtx, cancel := context.WithTimeout(ctx, ws.cfg.WriteTimeout)
+			err := c.conn.Write(writeCtx, websocket.MessageText, msg)
+			cancel()
+			if err != nil {
+				return
+			}
+
+		case <-pingTicker.C:
+			pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := c.conn.Ping(pingCtx)
+			cancel()
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 // handleDroneList returns the current state of all drones.
