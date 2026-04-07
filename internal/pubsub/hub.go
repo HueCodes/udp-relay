@@ -5,6 +5,7 @@ package pubsub
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -71,7 +72,7 @@ func (h *Hub) Stop() {
 	// Close all subscriber channels
 	h.mu.Lock()
 	for _, sub := range h.subscribers {
-		close(sub.Events)
+		sub.Close()
 	}
 	h.subscribers = make(map[string]*Subscriber)
 	h.mu.Unlock()
@@ -118,7 +119,7 @@ func (h *Hub) Unsubscribe(sub *Subscriber) {
 	for key, s := range h.subscribers {
 		if s.ID == sub.ID {
 			delete(h.subscribers, key)
-			close(s.Events)
+			s.Close()
 			h.logger.Info("subscriber unregistered",
 				"name", sub.Name,
 				"id", sub.ID,
@@ -140,15 +141,33 @@ func (h *Hub) run(ctx context.Context) {
 	defer h.wg.Done()
 
 	for {
+		if !h.runLoop(ctx) {
+			return
+		}
+	}
+}
+
+func (h *Hub) runLoop(ctx context.Context) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Error("pub/sub hub panicked, restarting",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			panicked = true
+		}
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-h.done:
-			return
+			return false
 		case event, ok := <-h.input:
 			if !ok {
 				h.logger.Debug("input channel closed")
-				return
+				return false
 			}
 			h.broadcast(event)
 		}
@@ -228,6 +247,17 @@ type Subscriber struct {
 	Name   string
 	Events chan *protocol.TelemetryEvent
 
+	// Ensures channel is closed exactly once
+	closeOnce sync.Once
+
 	// Metrics
 	dropped atomic.Uint64
+}
+
+// Close safely closes the subscriber's event channel.
+// It is safe to call multiple times.
+func (s *Subscriber) Close() {
+	s.closeOnce.Do(func() {
+		close(s.Events)
+	})
 }

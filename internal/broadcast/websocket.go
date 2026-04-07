@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -120,7 +121,24 @@ func (ws *WebSocketServer) Stop() {
 func (ws *WebSocketServer) broadcastLoop(ctx context.Context) {
 	defer ws.wg.Done()
 
-	// Batch updates at configured interval for efficiency
+	for {
+		if !ws.runBroadcastLoop(ctx) {
+			return
+		}
+	}
+}
+
+func (ws *WebSocketServer) runBroadcastLoop(ctx context.Context) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ws.logger.Error("broadcast loop panicked, restarting",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			panicked = true
+		}
+	}()
+
 	ticker := time.NewTicker(ws.cfg.BroadcastInterval)
 	defer ticker.Stop()
 
@@ -129,21 +147,20 @@ func (ws *WebSocketServer) broadcastLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-ws.done:
-			return
+			return false
 
 		case event, ok := <-ws.subscription.Events:
 			if !ok {
-				return
+				return false
 			}
-			// Collect events for batching
 			pendingUpdates = append(pendingUpdates, event)
 
 		case <-ticker.C:
 			if len(pendingUpdates) > 0 {
 				ws.broadcastUpdates(pendingUpdates)
-				pendingUpdates = pendingUpdates[:0] // Clear slice, keep capacity
+				pendingUpdates = pendingUpdates[:0]
 			}
 		}
 	}

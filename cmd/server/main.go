@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -161,13 +162,36 @@ func eventProcessor(
 	logger.Debug("event processor started")
 
 	for {
-		select {
-		case <-ctx.Done():
+		if !runEventProcessor(ctx, events, manager, logger) {
 			logger.Debug("event processor stopped")
 			return
+		}
+	}
+}
+
+func runEventProcessor(
+	ctx context.Context,
+	events <-chan *protocol.TelemetryEvent,
+	manager *drone.Manager,
+	logger *slog.Logger,
+) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("event processor panicked, restarting",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			panicked = true
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
 		case event, ok := <-events:
 			if !ok {
-				return
+				return false
 			}
 			manager.ProcessEvent(event)
 		}

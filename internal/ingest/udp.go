@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -204,8 +205,9 @@ type WorkerPool struct {
 	wg sync.WaitGroup
 
 	// Metrics
-	processed atomic.Uint64
-	errors    atomic.Uint64
+	processed    atomic.Uint64
+	errors       atomic.Uint64
+	outputDrops  atomic.Uint64
 }
 
 // NewWorkerPool creates a new worker pool.
@@ -248,15 +250,32 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 	logger.Debug("worker started")
 
 	for {
-		select {
-		case <-ctx.Done():
+		if !wp.runWorker(ctx, logger) {
 			logger.Debug("worker stopped")
 			return
+		}
+	}
+}
+
+func (wp *WorkerPool) runWorker(ctx context.Context, logger *slog.Logger) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("worker panicked, restarting",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			panicked = true
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
 
 		case pkt, ok := <-wp.input:
 			if !ok {
-				logger.Debug("worker stopped (channel closed)")
-				return
+				return false
 			}
 
 			wp.processPacket(pkt)
@@ -295,9 +314,12 @@ func (wp *WorkerPool) processPacket(pkt *Packet) {
 	case wp.output <- event:
 		// Successfully sent
 	default:
-		// Output channel full - this shouldn't happen often
-		wp.logger.Warn("output channel full, dropping event",
-			"system_id", event.DroneID.SystemID)
+		dropped := wp.outputDrops.Add(1)
+		if dropped%1000 == 1 {
+			wp.logger.Warn("output channel full, dropping event",
+				"system_id", event.DroneID.SystemID,
+				"total_dropped", dropped)
+		}
 	}
 }
 

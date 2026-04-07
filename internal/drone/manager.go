@@ -3,7 +3,9 @@ package drone
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hugh/go-drone-server/internal/config"
@@ -28,6 +30,9 @@ type Manager struct {
 
 	// Channel for state update notifications (fan-out)
 	updates chan<- StateUpdate
+
+	// Metrics
+	droppedUpdates atomic.Uint64
 
 	// For graceful shutdown
 	done chan struct{}
@@ -161,8 +166,13 @@ func (m *Manager) emitUpdate(update StateUpdate) {
 	select {
 	case m.updates <- update:
 	default:
-		// Channel full - drop update
-		// This is acceptable for telemetry; critical updates should use a different channel
+		dropped := m.droppedUpdates.Add(1)
+		if dropped%1000 == 1 {
+			m.logger.Warn("update channel full, dropping state update",
+				"drone_id", update.DroneID.SystemID,
+				"update_type", update.Type.String(),
+				"total_dropped", dropped)
+		}
 	}
 }
 
@@ -224,15 +234,33 @@ func (m *Manager) GetConnectedCount() int {
 func (m *Manager) staleChecker(ctx context.Context) {
 	defer m.wg.Done()
 
+	for {
+		if !m.runStaleChecker(ctx) {
+			return
+		}
+	}
+}
+
+func (m *Manager) runStaleChecker(ctx context.Context) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("stale checker panicked, restarting",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			panicked = true
+		}
+	}()
+
 	ticker := time.NewTicker(m.cfg.StaleCheckInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-m.done:
-			return
+			return false
 		case <-ticker.C:
 			m.checkStale()
 		}
