@@ -138,7 +138,7 @@ func main() {
 			<-ctx.Done()
 			shutCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
 			defer c()
-			metricsServer.Shutdown(shutCtx)
+			_ = metricsServer.Shutdown(shutCtx)
 		}()
 	}
 
@@ -217,7 +217,7 @@ func registerExpandedHealth(
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 }
 

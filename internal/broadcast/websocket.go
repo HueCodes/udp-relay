@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/hugh/go-drone-server/internal/config"
 	"github.com/hugh/go-drone-server/internal/drone"
@@ -157,7 +157,7 @@ func (ws *WebSocketServer) Stop() {
 	defer cancel()
 
 	if ws.server != nil {
-		ws.server.Shutdown(ctx)
+		_ = ws.server.Shutdown(ctx)
 	}
 
 	ws.wg.Wait()
@@ -221,7 +221,7 @@ func (ws *WebSocketServer) runBroadcastLoop(ctx context.Context) (panicked bool)
 }
 
 // broadcastUpdates sends batched updates to all connected WebSocket clients.
-func (ws *WebSocketServer) broadcastUpdates(events []*protocol.TelemetryEvent) {
+func (ws *WebSocketServer) broadcastUpdates(_ []*protocol.TelemetryEvent) {
 	summaries := ws.droneManager.GetAllSummaries()
 
 	msg := BroadcastMessage{
@@ -425,7 +425,7 @@ func (ws *WebSocketServer) handleDroneList(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // handleHealth returns server health status.
@@ -441,7 +441,7 @@ func (ws *WebSocketServer) handleHealth(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // BroadcastMessage is sent to WebSocket clients.

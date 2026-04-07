@@ -150,7 +150,7 @@ func (l *UDPListener) receiveLoop(ctx context.Context, packetChan chan<- *Packet
 		pkt := l.packetPool.Get()
 
 		// Set a short read deadline to allow checking for context cancellation
-		l.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_ = l.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 
 		n, remoteAddr, err := l.conn.ReadFromUDP(pkt.Data)
 		if err != nil {

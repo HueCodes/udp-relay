@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/hugh/go-drone-server/internal/config"
 	"github.com/hugh/go-drone-server/internal/drone"
@@ -170,9 +170,12 @@ func TestWebSocket_ConnectDisconnect(t *testing.T) {
 
 	// Connect via WebSocket
 	wsURL := "ws" + srv.URL[4:] + "/ws"
-	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	c, resp, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
 	}
 
 	// Register a drone and push a telemetry event
@@ -360,9 +363,12 @@ func TestWebSocket_SubscribeFilter(t *testing.T) {
 	})
 
 	wsURL := "ws" + srv.URL[4:] + "/ws"
-	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	c, resp, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("websocket dial: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
 	}
 
 	// Send subscribe message to filter to drone 1 only
@@ -424,15 +430,21 @@ func TestWebSocket_MaxClients(t *testing.T) {
 	wsURL := "ws" + srv.URL[4:] + "/ws"
 
 	// Connect 2 clients
-	c1, _, err := websocket.Dial(ctx, wsURL, nil)
+	c1, resp1, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial 1: %v", err)
 	}
+	if resp1 != nil && resp1.Body != nil {
+		defer resp1.Body.Close()
+	}
 	defer c1.Close(websocket.StatusNormalClosure, "")
 
-	c2, _, err := websocket.Dial(ctx, wsURL, nil)
+	c2, resp2, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial 2: %v", err)
+	}
+	if resp2 != nil && resp2.Body != nil {
+		defer resp2.Body.Close()
 	}
 	defer c2.Close(websocket.StatusNormalClosure, "")
 
