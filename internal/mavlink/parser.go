@@ -97,7 +97,7 @@ func (p *Parser) parseV2Frame(data []byte) (*Frame, int, error) {
 	}
 
 	// Total frame size: STX + Header(9) + Payload + Checksum(2) + optional signature(13)
-	frameSize := int(1 + 9 + payloadLen + 2)
+	frameSize := 1 + 9 + int(payloadLen) + 2
 
 	// Check for signature flag
 	incompatFlags := data[2]
@@ -264,7 +264,7 @@ func (d *Decoder) decodeGlobalPosition(payload []byte) *protocol.GPSPosition {
 	hdg := binary.LittleEndian.Uint16(payload[26:28])
 
 	// Calculate ground speed from vx, vy (cm/s to m/s)
-	groundSpeed := float64(vx*vx+vy*vy) / 10000.0
+	groundSpeed := (float64(int32(vx))*float64(int32(vx)) + float64(int32(vy))*float64(int32(vy))) / 10000.0
 
 	return &protocol.GPSPosition{
 		Latitude:    float64(lat) / 1e7,

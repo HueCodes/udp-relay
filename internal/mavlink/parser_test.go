@@ -324,13 +324,8 @@ func TestDecodeGlobalPositionInt(t *testing.T) {
 	assertFloat(t, "rel_altitude", gps.RelAltitude, 50.0, 0.01)
 	assertFloat(t, "heading", gps.Heading, 270.0, 0.01)
 
-	// The decoder computes groundSpeed as float64(vx*vx+vy*vy)/10000.0 using
-	// int16 arithmetic, which overflows for large velocities. With vx=100,
-	// vy=200: int16(10000+40000) wraps to int16(50000) = -15536.
-	// This is a known limitation of the production code.
-	vxI, vyI := int16(vx), int16(vy)
-	expectedGS := float64(vxI*vxI+vyI*vyI) / 10000.0
-	assertFloat(t, "ground_speed", gps.GroundSpeed, expectedGS, 0.01)
+	// vx=100 (1 m/s), vy=200 (2 m/s) => groundSpeed = (100^2 + 200^2) / 10000 = 5.0
+	assertFloat(t, "ground_speed", gps.GroundSpeed, 5.0, 0.01)
 }
 
 func TestDecodeGlobalPositionShortPayload(t *testing.T) {
