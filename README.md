@@ -5,217 +5,115 @@ A high-performance Go server for aggregating MAVLink telemetry from PX4-based dr
 ## Architecture
 
 ```
-                              ┌─────────────────────────────────────────────────┐
-                              │              DRONE FLEET                        │
-                              │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐            │
-                              │  │Drone│  │Drone│  │Drone│  │Drone│   ...      │
-                              │  │ #1  │  │ #2  │  │ #3  │  │ #N  │            │
-                              │  └──┬──┘  └──┬──┘  └──┬──┘  └──┬──┘            │
-                              └─────┼────────┼────────┼────────┼───────────────┘
-                                    │        │        │        │
-                                    │   MAVLink UDP (14550)    │
-                                    │        │        │        │
-                              ┌─────▼────────▼────────▼────────▼───────────────┐
-                              │                                                 │
-                              │              UDP INGEST LAYER                   │
-                              │  ┌─────────────────────────────────────────┐   │
-                              │  │           Packet Queue (10k buffer)      │   │
-                              │  └─────────────────┬───────────────────────┘   │
-                              │                    │                            │
-                              │  ┌────────┬────────┼────────┬────────┐         │
-                              │  │Worker 1│Worker 2│Worker 3│Worker N│         │
-                              │  │(parse) │(parse) │(parse) │(parse) │         │
-                              │  └────┬───┴────┬───┴────┬───┴────┬───┘         │
-                              │       │        │        │        │              │
-                              │       └────────┼────────┼────────┘              │
-                              │                │                                │
-                              └────────────────┼────────────────────────────────┘
-                                               │
-                                      Telemetry Events
-                                               │
-                    ┌──────────────────────────┼──────────────────────────┐
-                    │                          │                          │
-                    ▼                          ▼                          │
-          ┌─────────────────┐        ┌─────────────────┐                  │
-          │  DRONE MANAGER  │        │   PUB/SUB HUB   │                  │
-          │                 │        │    (Fan-Out)    │                  │
-          │ ┌─────────────┐ │        │                 │                  │
-          │ │  Registry   │ │        │ ┌────┐ ┌────┐   │                  │
-          │ │ (RWMutex)   │ │        │ │Sub1│ │Sub2│   │                  │
-          │ │             │ │        │ └──┬─┘ └──┬─┘   │                  │
-          │ │ Drone #1 ───┼─┼───────▶│    │      │     │                  │
-          │ │ Drone #2    │ │        │    ▼      ▼     │                  │
-          │ │ Drone #N    │ │        │ ┌────┐ ┌────┐   │                  │
-          │ └─────────────┘ │        │ │ WS │ │Log │   │                  │
-          │                 │        │ └────┘ └────┘   │                  │
-          └─────────────────┘        └─────────────────┘                  │
-                    │                         │                           │
-                    │                         │                           │
-                    ▼                         ▼                           │
-          ┌─────────────────────────────────────────────────────────┐    │
-          │                   HTTP / WEBSOCKET                       │    │
-          │                                                          │    │
-          │   GET /api/drones     →  JSON drone list                │    │
-          │   GET /api/health     →  Server health                  │    │
-          │   WS  /ws            →  Real-time updates               │    │
-          │                                                          │    │
-          └─────────────────────────────────────────────────────────┘    │
-                              │                                           │
-                              ▼                                           │
-                    ┌───────────────────┐                                │
-                    │  FRONTEND CLIENTS │                                │
-                    │  (Web Dashboard)  │                                │
-                    └───────────────────┘                                │
-```
-
-## Key Design Decisions
-
-### 1. Worker Pool Pattern for UDP Processing
-
-The UDP listener uses a fixed-size worker pool to process incoming packets:
-
-```go
-// Non-blocking send to worker pool
-select {
-case packetChan <- pkt:
-    // Successfully queued
-default:
-    // Queue full - drop packet
-    l.packetsDropped.Add(1)
-}
-```
-
-**Why?** This prevents a single misbehaving drone (sending malformed or high-frequency packets) from blocking the entire ingest pipeline. Each worker processes packets independently, and rate limiting is applied per-drone.
-
-### 2. RWMutex for Drone Registry
-
-The drone registry uses `sync.RWMutex` instead of channels for state management:
-
-```go
-type Manager struct {
-    mu     sync.RWMutex
-    drones map[protocol.DroneID]*State
-}
-```
-
-**Why?** Telemetry reads (WebSocket broadcasts, API queries) vastly outnumber writes. RWMutex allows concurrent readers while only blocking for writes. This is more efficient than a channel-based approach for this read-heavy workload.
-
-### 3. Fan-Out with Non-Blocking Sends
-
-The pub/sub hub broadcasts to subscribers using non-blocking channel sends:
-
-```go
-select {
-case sub.Events <- event:
-    // Success
-default:
-    // Subscriber too slow - drop event
-    sub.dropped.Add(1)
-}
-```
-
-**Why?** A slow WebSocket client should never cause backpressure that affects telemetry ingestion. Dropped events are acceptable for real-time telemetry; the next update will contain current state.
-
-### 4. Zero-Copy MAVLink Parsing
-
-The MAVLink parser returns slices that reference the original buffer:
-
-```go
-// Zero-copy payload reference
-frame.Payload = data[payloadStart:payloadEnd]
-```
-
-**Why?** At high throughput (thousands of packets/second), copying every payload would create significant GC pressure. Workers must process frames before the buffer is recycled.
-
-### 5. Buffer Pooling
-
-Packet buffers are pooled using `sync.Pool`:
-
-```go
-type PacketPool struct {
-    pool       sync.Pool
-    bufferSize int
-}
-```
-
-**Why?** Reduces allocation overhead during high-throughput ingestion. Each UDP read gets a pre-allocated buffer from the pool, processes it, and returns it.
-
-## Project Structure
-
-```
-go-drone-server/
-├── cmd/
-│   └── server/
-│       └── main.go           # Application entry point
-├── internal/
-│   ├── config/
-│   │   └── config.go         # Configuration management
-│   ├── drone/
-│   │   ├── manager.go        # Drone registry (thread-safe)
-│   │   └── state.go          # Drone state definitions
-│   ├── ingest/
-│   │   ├── packet.go         # Packet buffer pooling
-│   │   └── udp.go            # UDP listener + worker pool
-│   ├── mavlink/
-│   │   └── parser.go         # MAVLink v2 frame parser
-│   ├── pubsub/
-│   │   └── hub.go            # Fan-out event distribution
-│   └── broadcast/
-│       └── websocket.go      # WebSocket server
-├── pkg/
-│   └── protocol/
-│       └── mavlink.go        # Public MAVLink types
-├── Makefile
-├── go.mod
-└── README.md
+DRONE FLEET (MAVLink UDP :14550)
+         |
+   UDP INGEST LAYER
+   - Packet Queue (10k buffer)
+   - Worker Pool (N goroutines, token bucket rate limiting)
+   - MAVLink v2 parser with CRC-16/MCRF4XX validation
+   - Source IP/CIDR whitelist
+         |
+   Telemetry Events (validated)
+         |
+    +----------+----------+
+    |                     |
+DRONE MANAGER         PUB/SUB HUB
+(RWMutex registry)    (fan-out, non-blocking)
+- State tracking       - Subscriber management
+- Arm/disarm detect    - Slow subscriber drops
+- Stale detection           |
+         |              WebSocket Broadcaster
+    HTTP/WS SERVER        |
+    - GET /api/drones     WebSocket Clients
+    - GET /api/health     (filtered by drone ID)
+    - WS  /ws
+    - GET /metrics (Prometheus, :9090)
 ```
 
 ## Quick Start
 
-### Build
-
 ```bash
-make build
+# Build and run with defaults (UDP :14550, HTTP :8080, Metrics :9090)
+make build && ./build/drone-server
+
+# With config file
+./build/drone-server -config config.example.yaml
+
+# With CLI overrides
+./build/drone-server -udp=:14550 -http=:8080 -log-level=debug -log-format=json
+
+# Docker
+docker compose up -d
+
+# Docker with monitoring stack (Prometheus + Grafana)
+docker compose --profile monitoring up -d
 ```
 
-### Run
+## Configuration
 
-```bash
-# Default settings (UDP :14550, HTTP :8080)
-make run
+All settings can be configured via YAML file (`-config` flag) with CLI flag overrides. See `config.example.yaml` for all options with defaults.
 
-# Custom ports
-./build/drone-server -udp=:14550 -http=:8080
+### CLI Flags
 
-# Debug logging
-./build/drone-server -log-level=debug
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-config` | | Path to YAML config file |
+| `-udp` | `:14550` | UDP listen address |
+| `-http` | `:8080` | HTTP/WebSocket listen address |
+| `-workers` | `8` | Packet processing workers |
+| `-log-level` | `info` | Log level (debug, info, warn, error) |
+| `-log-format` | `text` | Log format (text, json) |
+
+### Config Reference
+
+```yaml
+udp:
+  bind_address: ":14550"
+  read_buffer_size: 1024        # Per-packet read buffer
+  socket_buffer_size: 8388608   # OS socket buffer (8MB)
+  packet_queue_size: 10000      # Max queued packets
+  allowed_cidrs: []             # Source IP whitelist (empty = accept all)
+
+workers:
+  pool_size: 8
+  process_timeout: 10ms
+
+drone:
+  stale_check_interval: 10s     # How often to check for stale drones
+  stale_threshold: 30s          # Time before drone marked disconnected
+  max_messages_per_second: 200  # Per-drone rate limit
+  rate_limit_burst: 50          # Burst allowance above sustained rate
+
+mavlink:
+  validate_crc: true            # CRC-16/MCRF4XX validation
+
+websocket:
+  bind_address: ":8080"
+  broadcast_interval: 100ms     # State update frequency (10 Hz)
+  write_timeout: 10s
+  max_message_size: 4096
+  max_clients: 100
+
+pubsub:
+  subscriber_buffer_size: 256
+  drop_on_slow_subscriber: true
+
+metrics:
+  enabled: true
+  bind_address: ":9090"
+
+debug:
+  pprof_enabled: false          # /debug/pprof endpoints on metrics server
+
+shutdown:
+  timeout: 10s
 ```
 
-### Test with PX4 SITL
-
-1. Start the telemetry server:
-   ```bash
-   make run
-   ```
-
-2. Start PX4 SITL (in your PX4-Autopilot directory):
-   ```bash
-   make px4_sitl gazebo-classic
-   ```
-
-3. The server will automatically receive telemetry on port 14550.
-
-4. Check the API:
-   ```bash
-   curl http://localhost:8080/api/drones
-   curl http://localhost:8080/api/health
-   ```
-
-## API Reference
+## REST API
 
 ### GET /api/drones
 
-Returns current state of all connected drones.
+Returns current state of all known drones.
 
 ```json
 {
@@ -243,44 +141,173 @@ Returns current state of all connected drones.
 
 ### GET /api/health
 
-Returns server health status.
+Returns per-component health, system stats, uptime, and version.
 
 ```json
 {
   "status": "ok",
+  "version": "v1.0.0",
   "timestamp": 1702847123456,
-  "connected_drones": 2,
-  "total_drones": 3,
-  "total_messages": 15420
+  "uptime_seconds": 3600.5,
+  "components": {
+    "udp": {
+      "packets_received": 150000,
+      "packets_dropped": 12,
+      "parse_errors": 3
+    },
+    "drones": {
+      "total": 5,
+      "connected": 3,
+      "armed": 1,
+      "messages": 150000
+    },
+    "pubsub": {
+      "subscribers": 2,
+      "events_received": 149985,
+      "events_broadcast": 299970,
+      "events_dropped": 0
+    },
+    "websocket": {
+      "clients": 2
+    }
+  },
+  "system": {
+    "goroutines": 24,
+    "heap_alloc_mb": 12.5,
+    "telemetry_chan_utilization": 0.02
+  }
 }
 ```
 
-## Configuration
+### GET /metrics
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-udp` | `:14550` | UDP listen address for MAVLink |
-| `-http` | `:8080` | HTTP listen address for WebSocket/API |
-| `-workers` | `8` | Number of packet processing workers |
-| `-log-level` | `info` | Log level (debug, info, warn, error) |
-| `-log-format` | `text` | Log format (text, json) |
+Prometheus metrics endpoint (on metrics server, default `:9090`).
 
-## Performance Considerations
+Available metrics:
+- `udp_packets_received_total` - Total UDP packets received
+- `udp_packets_dropped_total{reason}` - Dropped packets by reason
+- `mavlink_parse_errors_total` - MAVLink parse errors
+- `active_drones` - Currently connected drones
+- `websocket_clients_active` - Active WebSocket connections
+- `event_channel_utilization` - Telemetry channel usage
+- `worker_pool_utilization` - Packet queue usage
+- `rate_limited_packets_total` - Rate-limited packets
+- `telemetry_latency_seconds` - Processing latency histogram
 
-- **UDP Buffer**: 8MB socket buffer handles burst traffic
-- **Packet Queue**: 10,000 packet buffer absorbs spikes
-- **Rate Limiting**: 200 msg/sec per drone prevents flooding
-- **Worker Pool**: 8 workers for parallel packet processing
-- **Broadcast Interval**: 100ms batching reduces WebSocket overhead
+## WebSocket Protocol
 
-## Future Enhancements
+### Connect
 
-- [ ] Full WebSocket implementation (gorilla/websocket)
-- [ ] Message persistence (time-series database)
-- [ ] Prometheus metrics endpoint
-- [ ] MAVLink command sending (bidirectional)
-- [ ] Geographic fencing and alerts
-- [ ] Multi-datacenter replication
+```
+ws://localhost:8080/ws
+```
+
+### Subscribe (Optional Filter)
+
+Send a JSON message to filter updates to specific drones:
+
+```json
+{
+  "drone_ids": [1, 3, 5],
+  "event_types": ["telemetry", "armed", "disarmed"]
+}
+```
+
+Send an empty object or omit to receive all updates.
+
+### Receive State Updates
+
+The server sends JSON state updates at the configured broadcast interval:
+
+```json
+{
+  "type": "state_update",
+  "timestamp": 1702847123456,
+  "drones": [
+    {
+      "system_id": 1,
+      "connected": true,
+      "armed": true,
+      "flight_mode": "MISSION",
+      "lat": 47.397742,
+      "lon": 8.545594,
+      "alt": 488.5,
+      "heading": 90.0,
+      "battery_pct": 72,
+      "last_seen_ms": 1702847123400
+    }
+  ]
+}
+```
+
+### Keepalive
+
+The server sends WebSocket pings every 30 seconds. Clients that fail to respond are disconnected.
+
+## Deployment
+
+### Docker
+
+```bash
+docker build -t drone-server .
+docker run -p 14550:14550/udp -p 8080:8080 -p 9090:9090 drone-server
+```
+
+### Docker Compose
+
+```bash
+# Server only
+docker compose up -d
+
+# With Prometheus + Grafana
+docker compose --profile monitoring up -d
+# Grafana: http://localhost:3000 (admin/admin)
+# Prometheus: http://localhost:9091
+```
+
+### systemd
+
+```bash
+sudo cp deploy/drone-server.service /etc/systemd/system/
+sudo useradd -r -s /bin/false drone-server
+sudo cp build/drone-server /usr/local/bin/
+sudo mkdir -p /etc/drone-server
+sudo cp config.example.yaml /etc/drone-server/config.yaml
+sudo systemctl enable --now drone-server
+```
+
+## Monitoring
+
+### Useful Prometheus Queries
+
+```promql
+# Packet drop rate
+rate(udp_packets_dropped_total[5m])
+
+# Parse error rate
+rate(mavlink_parse_errors_total[5m])
+
+# P99 telemetry latency
+histogram_quantile(0.99, rate(telemetry_latency_seconds_bucket[5m]))
+
+# Active drone count
+active_drones
+
+# WebSocket client count
+websocket_clients_active
+```
+
+## Troubleshooting
+
+**No packets received**: Check firewall allows UDP 14550. Verify drone is sending to the correct address. Try `tcpdump -i any udp port 14550`.
+
+**High packet drops**: Increase `udp.socket_buffer_size` and `udp.packet_queue_size`. Add more workers.
+
+**Drones going stale**: Increase `drone.stale_threshold`. Check network reliability.
+
+**WebSocket not connecting**: Verify max_clients limit not reached. Check `/api/health` for server status.
+
+**High memory usage**: Check goroutine count in `/api/health`. Enable pprof (`debug.pprof_enabled: true`) and profile with `go tool pprof`.
 
 ## License
 
