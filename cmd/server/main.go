@@ -97,7 +97,7 @@ func main() {
 	// Create core components
 	droneManager := drone.NewManager(cfg.Drone, updateChan, logger)
 	hub := pubsub.NewHub(cfg.PubSub, telemetryChan, logger)
-	udpListener := ingest.NewUDPListener(cfg.UDP, cfg.Workers, telemetryChan, logger)
+	udpListener := ingest.NewUDPListener(cfg.UDP, cfg.Workers, cfg.Drone, telemetryChan, logger)
 	wsServer := broadcast.NewWebSocketServer(cfg.WebSocket, droneManager, hub, logger)
 
 	// Start components in dependency order

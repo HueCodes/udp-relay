@@ -21,12 +21,16 @@ import (
 type UDPListener struct {
 	cfg        config.UDPConfig
 	workerCfg  config.WorkerConfig
+	droneCfg   config.DroneConfig
 	conn       *net.UDPConn
 	packetPool *PacketPool
 	workerPool *WorkerPool
 
 	// Output channel for parsed telemetry events
 	output chan<- *protocol.TelemetryEvent
+
+	// Source IP whitelist (nil = accept all)
+	allowedNets []*net.IPNet
 
 	// Metrics
 	packetsReceived atomic.Uint64
@@ -41,16 +45,33 @@ type UDPListener struct {
 func NewUDPListener(
 	cfg config.UDPConfig,
 	workerCfg config.WorkerConfig,
+	droneCfg config.DroneConfig,
 	output chan<- *protocol.TelemetryEvent,
 	logger *slog.Logger,
 ) *UDPListener {
-	return &UDPListener{
+	l := &UDPListener{
 		cfg:        cfg,
 		workerCfg:  workerCfg,
+		droneCfg:   droneCfg,
 		packetPool: NewPacketPool(cfg.ReadBufferSize),
 		output:     output,
 		logger:     logger.With("component", "udp_listener"),
 	}
+
+	// Parse CIDR whitelist
+	for _, cidr := range cfg.AllowedCIDRs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			logger.Warn("invalid CIDR in whitelist, skipping", "cidr", cidr, "error", err)
+			continue
+		}
+		l.allowedNets = append(l.allowedNets, ipNet)
+	}
+	if len(l.allowedNets) > 0 {
+		logger.Info("source IP whitelist enabled", "cidrs", len(l.allowedNets))
+	}
+
+	return l
 }
 
 // Start begins listening for UDP packets.
@@ -86,6 +107,8 @@ func (l *UDPListener) Start(ctx context.Context) error {
 		packetChan,
 		l.output,
 		l.packetPool,
+		l.droneCfg.MaxMessagesPerSecond,
+		l.droneCfg.RateLimitBurst,
 		l.logger,
 	)
 	l.workerPool.Start(ctx)
@@ -154,6 +177,13 @@ func (l *UDPListener) receiveLoop(ctx context.Context, packetChan chan<- *Packet
 		pkt.SourceAddr = remoteAddr.String()
 		l.packetsReceived.Add(1)
 
+		// Check source IP whitelist
+		if len(l.allowedNets) > 0 && !l.isAllowed(remoteAddr.IP) {
+			l.packetsDropped.Add(1)
+			l.packetPool.Put(pkt)
+			continue
+		}
+
 		// Non-blocking send to worker pool
 		select {
 		case packetChan <- pkt:
@@ -181,6 +211,16 @@ func (l *UDPListener) Stats() ListenerStats {
 	}
 }
 
+// isAllowed checks if the source IP is in the whitelist.
+func (l *UDPListener) isAllowed(ip net.IP) bool {
+	for _, n := range l.allowedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListenerStats contains UDP listener statistics.
 type ListenerStats struct {
 	PacketsReceived uint64
@@ -199,8 +239,12 @@ type WorkerPool struct {
 	decoder    *mavlink.Decoder
 	logger     *slog.Logger
 
+	// Rate limiting config
+	rateLimit int
+	rateBurst int
+
 	// Rate limiters per system ID
-	rateLimiters sync.Map // map[uint8]*rateLimiter
+	rateLimiters sync.Map // map[uint8]*tokenBucket
 
 	wg sync.WaitGroup
 
@@ -216,6 +260,8 @@ func NewWorkerPool(
 	input <-chan *Packet,
 	output chan<- *protocol.TelemetryEvent,
 	packetPool *PacketPool,
+	rateLimit int,
+	rateBurst int,
 	logger *slog.Logger,
 ) *WorkerPool {
 	return &WorkerPool{
@@ -224,6 +270,8 @@ func NewWorkerPool(
 		output:     output,
 		packetPool: packetPool,
 		decoder:    mavlink.NewDecoder(),
+		rateLimit:  rateLimit,
+		rateBurst:  rateBurst,
 		logger:     logger.With("component", "worker_pool"),
 	}
 }
@@ -323,34 +371,49 @@ func (wp *WorkerPool) processPacket(pkt *Packet) {
 	}
 }
 
-// rateLimiter tracks message rates per drone.
-type rateLimiter struct {
-	count     atomic.Int64
-	resetTime atomic.Int64 // Unix timestamp in seconds
+// tokenBucket implements a simple token bucket rate limiter.
+type tokenBucket struct {
+	mu       sync.Mutex
+	tokens   float64
+	max      float64
+	rate     float64 // tokens per nanosecond
+	lastTime int64   // UnixNano
+}
+
+func newTokenBucket(perSecond int, burst int) *tokenBucket {
+	max := float64(perSecond + burst)
+	return &tokenBucket{
+		tokens:   max,
+		max:      max,
+		rate:     float64(perSecond) / 1e9,
+		lastTime: time.Now().UnixNano(),
+	}
 }
 
 // checkRateLimit returns true if the message should be processed.
 func (wp *WorkerPool) checkRateLimit(systemID uint8) bool {
-	const maxMessagesPerSecond = 200 // Generous limit for telemetry
+	limiterI, _ := wp.rateLimiters.LoadOrStore(systemID,
+		newTokenBucket(wp.rateLimit, wp.rateBurst))
+	bucket := limiterI.(*tokenBucket)
 
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
 
-	// Get or create rate limiter for this system ID
-	limiterI, _ := wp.rateLimiters.LoadOrStore(systemID, &rateLimiter{})
-	limiter := limiterI.(*rateLimiter)
+	elapsed := now - bucket.lastTime
+	bucket.lastTime = now
 
-	// Check if we need to reset the window
-	resetTime := limiter.resetTime.Load()
-	if now > resetTime {
-		// Try to reset (atomic compare-and-swap)
-		if limiter.resetTime.CompareAndSwap(resetTime, now+1) {
-			limiter.count.Store(0)
-		}
+	// Refill tokens
+	bucket.tokens += float64(elapsed) * bucket.rate
+	if bucket.tokens > bucket.max {
+		bucket.tokens = bucket.max
 	}
 
-	// Increment and check
-	count := limiter.count.Add(1)
-	return count <= maxMessagesPerSecond
+	if bucket.tokens < 1 {
+		return false
+	}
+	bucket.tokens--
+	return true
 }
 
 // Stats returns worker pool statistics.

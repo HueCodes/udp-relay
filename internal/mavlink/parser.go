@@ -14,11 +14,13 @@ import (
 
 // Parser errors
 var (
-	ErrInvalidMagic      = errors.New("mavlink: invalid start byte")
-	ErrFrameTooShort     = errors.New("mavlink: frame too short")
-	ErrPayloadTooLarge   = errors.New("mavlink: payload exceeds maximum size")
-	ErrChecksumMismatch  = errors.New("mavlink: checksum validation failed")
+	ErrInvalidMagic       = errors.New("mavlink: invalid start byte")
+	ErrFrameTooShort      = errors.New("mavlink: frame too short")
+	ErrPayloadTooLarge    = errors.New("mavlink: payload exceeds maximum size")
+	ErrChecksumMismatch   = errors.New("mavlink: checksum validation failed")
 	ErrUnsupportedVersion = errors.New("mavlink: unsupported protocol version")
+	ErrInvalidSystemID    = errors.New("mavlink: system ID out of valid range (1-250)")
+	ErrInvalidTelemetry   = errors.New("mavlink: telemetry values out of valid range")
 )
 
 // Frame represents a parsed MAVLink v2 frame header.
@@ -39,14 +41,18 @@ type Frame struct {
 type Parser struct {
 	// Buffer pool to reduce allocations during high-throughput parsing
 	bufferPool sync.Pool
+
+	// Whether to validate CRC checksums
+	ValidateCRC bool
 }
 
 // NewParser creates a new MAVLink parser with optimized buffer pooling.
+// CRC validation is enabled by default.
 func NewParser() *Parser {
 	return &Parser{
+		ValidateCRC: true,
 		bufferPool: sync.Pool{
 			New: func() any {
-				// Pre-allocate buffers for typical MAVLink frame sizes
 				buf := make([]byte, 0, 300)
 				return &buf
 			},
@@ -124,8 +130,17 @@ func (p *Parser) parseV2Frame(data []byte) (*Frame, int, error) {
 	// Extract checksum (little-endian, after payload)
 	frame.Checksum = binary.LittleEndian.Uint16(data[payloadEnd : payloadEnd+2])
 
-	// TODO: Validate CRC if strict mode is enabled
-	// For high-throughput scenarios, we may skip CRC to reduce CPU load
+	// Validate CRC-16/MCRF4XX if enabled
+	if p.ValidateCRC {
+		if seed, ok := crcSeed[msgID]; ok {
+			// CRC covers bytes 1..payloadEnd (header + payload, excluding STX)
+			computed := crcCalculate(data[1:payloadEnd], seed)
+			if computed != frame.Checksum {
+				return nil, 0, ErrChecksumMismatch
+			}
+		}
+		// Unknown message IDs: skip CRC check (no seed available)
+	}
 
 	return frame, frameSize, nil
 }
@@ -143,12 +158,24 @@ func NewDecoder() *Decoder {
 	}
 }
 
+// NewDecoderWithCRC creates a decoder with configurable CRC validation.
+func NewDecoderWithCRC(validateCRC bool) *Decoder {
+	p := NewParser()
+	p.ValidateCRC = validateCRC
+	return &Decoder{parser: p}
+}
+
 // DecodePacket parses a raw packet and returns a TelemetryEvent.
 // This is the main entry point for the ingest pipeline.
 func (d *Decoder) DecodePacket(data []byte, sourceAddr string) (*protocol.TelemetryEvent, error) {
 	frame, _, err := d.parser.ParseFrame(data)
 	if err != nil {
 		return nil, err
+	}
+
+	// Validate system ID range (1-250)
+	if !ValidateSystemID(frame.SystemID) {
+		return nil, ErrInvalidSystemID
 	}
 
 	event := &protocol.TelemetryEvent{
@@ -161,9 +188,22 @@ func (d *Decoder) DecodePacket(data []byte, sourceAddr string) (*protocol.Teleme
 		SourceAddr: sourceAddr,
 	}
 
-	// Decode payload based on message type
-	event.Payload = d.decodePayload(frame)
+	// Decode and validate payload based on message type
+	payload := d.decodePayload(frame)
 
+	// Validate telemetry values
+	switch p := payload.(type) {
+	case *protocol.GPSPosition:
+		if p != nil && !ValidateGPS(p) {
+			return nil, ErrInvalidTelemetry
+		}
+	case *protocol.BatteryStatus:
+		if p != nil && !ValidateBattery(p) {
+			return nil, ErrInvalidTelemetry
+		}
+	}
+
+	event.Payload = payload
 	return event, nil
 }
 

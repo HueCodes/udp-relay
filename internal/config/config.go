@@ -16,6 +16,9 @@ type Config struct {
 	// Drone management settings
 	Drone DroneConfig
 
+	// MAVLink parsing settings
+	MAVLink MAVLinkConfig
+
 	// WebSocket broadcast settings
 	WebSocket WebSocketConfig
 
@@ -36,6 +39,9 @@ type UDPConfig struct {
 
 	// Maximum packets to queue before applying backpressure
 	PacketQueueSize int
+
+	// Allowed source CIDRs (empty = accept all)
+	AllowedCIDRs []string
 }
 
 // WorkerConfig contains worker pool settings.
@@ -58,8 +64,17 @@ type DroneConfig struct {
 	// Maximum messages per second from a single drone before rate limiting
 	MaxMessagesPerSecond int
 
+	// Burst allowance above the sustained rate
+	RateLimitBurst int
+
 	// Rate limit window duration
 	RateLimitWindow time.Duration
+}
+
+// MAVLinkConfig contains MAVLink parsing settings.
+type MAVLinkConfig struct {
+	// Whether to validate CRC-16/MCRF4XX checksums
+	ValidateCRC bool
 }
 
 // WebSocketConfig contains WebSocket server settings.
@@ -102,8 +117,12 @@ func Default() Config {
 		Drone: DroneConfig{
 			StaleCheckInterval:   10 * time.Second,
 			StaleThreshold:       30 * time.Second,
-			MaxMessagesPerSecond: 100,             // 100 msgs/sec per drone
+			MaxMessagesPerSecond: 200,
+			RateLimitBurst:       50,
 			RateLimitWindow:      time.Second,
+		},
+		MAVLink: MAVLinkConfig{
+			ValidateCRC: true,
 		},
 		WebSocket: WebSocketConfig{
 			BindAddress:       ":8080",
