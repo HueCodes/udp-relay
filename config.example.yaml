@@ -1,0 +1,46 @@
+# Drone Telemetry Server Configuration
+# All values shown are defaults. Uncomment and modify as needed.
+
+udp:
+  bind_address: ":14550"
+  read_buffer_size: 1024
+  socket_buffer_size: 8388608  # 8MB
+  packet_queue_size: 10000
+  # allowed_cidrs:
+  #   - "10.0.0.0/8"
+  #   - "192.168.1.0/24"
+
+workers:
+  pool_size: 8
+  process_timeout: 10ms
+
+drone:
+  stale_check_interval: 10s
+  stale_threshold: 30s
+  max_messages_per_second: 200
+  rate_limit_burst: 50
+  rate_limit_window: 1s
+
+mavlink:
+  validate_crc: true
+
+websocket:
+  bind_address: ":8080"
+  broadcast_interval: 100ms
+  write_timeout: 10s
+  max_message_size: 4096
+  max_clients: 100
+
+pubsub:
+  subscriber_buffer_size: 256
+  drop_on_slow_subscriber: true
+
+metrics:
+  enabled: true
+  bind_address: ":9090"
+
+debug:
+  pprof_enabled: false
+
+shutdown:
+  timeout: 10s

@@ -100,6 +100,12 @@ func NewWebSocketServer(
 	return ws
 }
 
+// RegisterHandler adds an HTTP handler to the server's mux.
+// Must be called before Start.
+func (ws *WebSocketServer) RegisterHandler(pattern string, handler http.HandlerFunc) {
+	ws.mux.HandleFunc(pattern, handler)
+}
+
 // Start begins the WebSocket server.
 func (ws *WebSocketServer) Start(ctx context.Context) error {
 	ws.server = &http.Server{

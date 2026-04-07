@@ -2,106 +2,84 @@
 package config
 
 import (
+	"fmt"
+	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds all server configuration parameters.
 type Config struct {
-	// UDP ingest settings
-	UDP UDPConfig
-
-	// Worker pool settings
-	Workers WorkerConfig
-
-	// Drone management settings
-	Drone DroneConfig
-
-	// MAVLink parsing settings
-	MAVLink MAVLinkConfig
-
-	// WebSocket broadcast settings
-	WebSocket WebSocketConfig
-
-	// Pub/Sub hub settings
-	PubSub PubSubConfig
+	UDP       UDPConfig       `yaml:"udp"`
+	Workers   WorkerConfig    `yaml:"workers"`
+	Drone     DroneConfig     `yaml:"drone"`
+	MAVLink   MAVLinkConfig   `yaml:"mavlink"`
+	WebSocket WebSocketConfig `yaml:"websocket"`
+	PubSub    PubSubConfig    `yaml:"pubsub"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	Debug     DebugConfig     `yaml:"debug"`
+	Shutdown  ShutdownConfig  `yaml:"shutdown"`
 }
 
 // UDPConfig contains UDP listener settings.
 type UDPConfig struct {
-	// Address to bind the UDP listener (e.g., ":14550")
-	BindAddress string
-
-	// Size of the UDP read buffer per packet
-	ReadBufferSize int
-
-	// OS-level socket receive buffer size
-	SocketBufferSize int
-
-	// Maximum packets to queue before applying backpressure
-	PacketQueueSize int
-
-	// Allowed source CIDRs (empty = accept all)
-	AllowedCIDRs []string
+	BindAddress      string   `yaml:"bind_address"`
+	ReadBufferSize   int      `yaml:"read_buffer_size"`
+	SocketBufferSize int      `yaml:"socket_buffer_size"`
+	PacketQueueSize  int      `yaml:"packet_queue_size"`
+	AllowedCIDRs     []string `yaml:"allowed_cidrs"`
 }
 
 // WorkerConfig contains worker pool settings.
 type WorkerConfig struct {
-	// Number of packet processing workers
-	PoolSize int
-
-	// Maximum time to process a single packet before logging a warning
-	ProcessTimeout time.Duration
+	PoolSize       int           `yaml:"pool_size"`
+	ProcessTimeout time.Duration `yaml:"process_timeout"`
 }
 
 // DroneConfig contains drone registry settings.
 type DroneConfig struct {
-	// How often to check for stale drones
-	StaleCheckInterval time.Duration
-
-	// Time after last message before a drone is considered stale
-	StaleThreshold time.Duration
-
-	// Maximum messages per second from a single drone before rate limiting
-	MaxMessagesPerSecond int
-
-	// Burst allowance above the sustained rate
-	RateLimitBurst int
-
-	// Rate limit window duration
-	RateLimitWindow time.Duration
+	StaleCheckInterval   time.Duration `yaml:"stale_check_interval"`
+	StaleThreshold       time.Duration `yaml:"stale_threshold"`
+	MaxMessagesPerSecond int           `yaml:"max_messages_per_second"`
+	RateLimitBurst       int           `yaml:"rate_limit_burst"`
+	RateLimitWindow      time.Duration `yaml:"rate_limit_window"`
 }
 
 // MAVLinkConfig contains MAVLink parsing settings.
 type MAVLinkConfig struct {
-	// Whether to validate CRC-16/MCRF4XX checksums
-	ValidateCRC bool
+	ValidateCRC bool `yaml:"validate_crc"`
 }
 
 // WebSocketConfig contains WebSocket server settings.
 type WebSocketConfig struct {
-	// Address to bind the WebSocket server
-	BindAddress string
-
-	// Broadcast interval for state updates
-	BroadcastInterval time.Duration
-
-	// Write timeout for client connections
-	WriteTimeout time.Duration
-
-	// Maximum message size from clients
-	MaxMessageSize int64
-
-	// Maximum concurrent WebSocket clients (0 = unlimited)
-	MaxClients int
+	BindAddress       string        `yaml:"bind_address"`
+	BroadcastInterval time.Duration `yaml:"broadcast_interval"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	MaxMessageSize    int64         `yaml:"max_message_size"`
+	MaxClients        int           `yaml:"max_clients"`
 }
 
 // PubSubConfig contains pub/sub hub settings.
 type PubSubConfig struct {
-	// Buffer size for subscriber channels
-	SubscriberBufferSize int
+	SubscriberBufferSize int  `yaml:"subscriber_buffer_size"`
+	DropOnSlowSubscriber bool `yaml:"drop_on_slow_subscriber"`
+}
 
-	// Whether to drop events on slow subscribers (vs blocking)
-	DropOnSlowSubscriber bool
+// MetricsConfig contains Prometheus metrics settings.
+type MetricsConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	BindAddress string `yaml:"bind_address"`
+}
+
+// DebugConfig contains debug/profiling settings.
+type DebugConfig struct {
+	PprofEnabled bool `yaml:"pprof_enabled"`
+}
+
+// ShutdownConfig contains graceful shutdown settings.
+type ShutdownConfig struct {
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // Default returns a production-ready default configuration.
@@ -109,13 +87,13 @@ func Default() Config {
 	return Config{
 		UDP: UDPConfig{
 			BindAddress:      ":14550",
-			ReadBufferSize:   1024,                // MAVLink max frame ~280 bytes
-			SocketBufferSize: 8 * 1024 * 1024,     // 8MB socket buffer
-			PacketQueueSize:  10000,               // Queue up to 10k packets
+			ReadBufferSize:   1024,
+			SocketBufferSize: 8 * 1024 * 1024,
+			PacketQueueSize:  10000,
 		},
 		Workers: WorkerConfig{
-			PoolSize:       8,                     // 8 worker goroutines
-			ProcessTimeout: 10 * time.Millisecond, // Warn if processing takes >10ms
+			PoolSize:       8,
+			ProcessTimeout: 10 * time.Millisecond,
 		},
 		Drone: DroneConfig{
 			StaleCheckInterval:   10 * time.Second,
@@ -129,14 +107,40 @@ func Default() Config {
 		},
 		WebSocket: WebSocketConfig{
 			BindAddress:       ":8080",
-			BroadcastInterval: 100 * time.Millisecond, // 10 Hz updates
+			BroadcastInterval: 100 * time.Millisecond,
 			WriteTimeout:      10 * time.Second,
 			MaxMessageSize:    4096,
 			MaxClients:        100,
 		},
 		PubSub: PubSubConfig{
 			SubscriberBufferSize: 256,
-			DropOnSlowSubscriber: true, // Non-blocking fan-out
+			DropOnSlowSubscriber: true,
+		},
+		Metrics: MetricsConfig{
+			Enabled:     true,
+			BindAddress: ":9090",
+		},
+		Debug: DebugConfig{
+			PprofEnabled: false,
+		},
+		Shutdown: ShutdownConfig{
+			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// LoadFile reads a YAML config file and merges it over defaults.
+func LoadFile(path string) (Config, error) {
+	cfg := Default()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, fmt.Errorf("read config file: %w", err)
+	}
+
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse config file: %w", err)
+	}
+
+	return cfg, nil
 }

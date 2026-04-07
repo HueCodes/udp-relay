@@ -3,98 +3,88 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log/slog"
+	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/hugh/go-drone-server/internal/broadcast"
 	"github.com/hugh/go-drone-server/internal/config"
 	"github.com/hugh/go-drone-server/internal/drone"
 	"github.com/hugh/go-drone-server/internal/ingest"
+	_ "github.com/hugh/go-drone-server/internal/metrics" // register metrics
 	"github.com/hugh/go-drone-server/internal/pubsub"
 	"github.com/hugh/go-drone-server/pkg/protocol"
 )
 
+// Set at build time via -ldflags.
+var version = "dev"
+
 func main() {
-	// Parse command-line flags
 	var (
-		udpAddr   = flag.String("udp", ":14550", "UDP listen address for MAVLink")
-		httpAddr  = flag.String("http", ":8080", "HTTP listen address for WebSocket/API")
-		workers   = flag.Int("workers", 8, "Number of packet processing workers")
-		logLevel  = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-		logFormat = flag.String("log-format", "text", "Log format (text, json)")
+		configFile = flag.String("config", "", "Path to YAML config file")
+		udpAddr    = flag.String("udp", "", "UDP listen address (overrides config)")
+		httpAddr   = flag.String("http", "", "HTTP listen address (overrides config)")
+		workers    = flag.Int("workers", 0, "Number of workers (overrides config)")
+		logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		logFormat  = flag.String("log-format", "text", "Log format (text, json)")
 	)
 	flag.Parse()
 
-	// Configure structured logging
 	logger := configureLogger(*logLevel, *logFormat)
 
-	logger.Info("Starting Drone Telemetry Server",
-		"udp_address", *udpAddr,
-		"http_address", *httpAddr,
-		"workers", *workers,
+	// Load config: file defaults -> YAML file -> CLI overrides
+	var cfg config.Config
+	var err error
+	if *configFile != "" {
+		cfg, err = config.LoadFile(*configFile)
+		if err != nil {
+			logger.Error("failed to load config file", "path", *configFile, "error", err)
+			os.Exit(1)
+		}
+		logger.Info("loaded config file", "path", *configFile)
+	} else {
+		cfg = config.Default()
+	}
+
+	// CLI flag overrides
+	if *udpAddr != "" {
+		cfg.UDP.BindAddress = *udpAddr
+	}
+	if *httpAddr != "" {
+		cfg.WebSocket.BindAddress = *httpAddr
+	}
+	if *workers > 0 {
+		cfg.Workers.PoolSize = *workers
+	}
+
+	logger.Info("starting drone telemetry server",
+		"version", version,
+		"udp_address", cfg.UDP.BindAddress,
+		"http_address", cfg.WebSocket.BindAddress,
+		"workers", cfg.Workers.PoolSize,
 	)
 
-	// Load configuration with command-line overrides
-	cfg := config.Default()
-	cfg.UDP.BindAddress = *udpAddr
-	cfg.WebSocket.BindAddress = *httpAddr
-	cfg.Workers.PoolSize = *workers
-
-	// Create root context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Initialize the processing pipeline
-	//
-	// Architecture:
-	//
-	//   UDP Socket
-	//       │
-	//       ▼
-	//   ┌─────────────────┐
-	//   │  Packet Queue   │  (buffered channel)
-	//   └────────┬────────┘
-	//            │
-	//   ┌────────▼────────┐
-	//   │   Worker Pool   │  (N goroutines parsing MAVLink)
-	//   └────────┬────────┘
-	//            │
-	//   ┌────────▼────────┐
-	//   │ Telemetry Chan  │  (parsed events)
-	//   └────────┬────────┘
-	//            │
-	//      ┌─────┴─────┐
-	//      │           │
-	//      ▼           ▼
-	//  ┌───────┐  ┌─────────┐
-	//  │ Drone │  │ Pub/Sub │
-	//  │Manager│  │   Hub   │
-	//  └───────┘  └────┬────┘
-	//                  │
-	//            ┌─────┴─────┐
-	//            │           │
-	//            ▼           ▼
-	//      ┌──────────┐  ┌────────┐
-	//      │ WebSocket│  │ Logger │
-	//      │Broadcaster│  │(future)│
-	//      └──────────┘  └────────┘
-
-	// Channel for parsed telemetry events (from workers to consumers)
+	// Channels
 	telemetryChan := make(chan *protocol.TelemetryEvent, 1000)
-
-	// Channel for drone state updates (from manager to pub/sub)
 	updateChan := make(chan drone.StateUpdate, 256)
 
-	// Create core components
+	// Core components
 	droneManager := drone.NewManager(cfg.Drone, updateChan, logger)
 	hub := pubsub.NewHub(cfg.PubSub, telemetryChan, logger)
 	udpListener := ingest.NewUDPListener(cfg.UDP, cfg.Workers, cfg.Drone, telemetryChan, logger)
@@ -104,54 +94,135 @@ func main() {
 	droneManager.Start(ctx)
 	hub.Start(ctx)
 
-	// Start event processor (connects telemetry to drone manager)
 	go eventProcessor(ctx, telemetryChan, droneManager, logger)
 
-	// Start WebSocket server (non-blocking)
 	go func() {
 		if err := wsServer.Start(ctx); err != nil {
 			logger.Error("WebSocket server error", "error", err)
 		}
 	}()
 
-	// Start UDP listener (blocks until context cancelled)
 	go func() {
 		if err := udpListener.Start(ctx); err != nil {
 			logger.Error("UDP listener error", "error", err)
-			cancel() // Trigger shutdown on fatal error
+			cancel()
 		}
 	}()
 
-	// Print startup banner
-	printBanner(logger, *udpAddr, *httpAddr)
+	// Prometheus metrics server
+	if cfg.Metrics.Enabled {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.Handler())
 
-	// Wait for shutdown signal
+		// Optional pprof endpoints on metrics server
+		if cfg.Debug.PprofEnabled {
+			metricsMux.HandleFunc("/debug/pprof/", pprof.Index)
+			metricsMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			metricsMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			metricsMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			metricsMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+			logger.Info("pprof endpoints enabled", "address", cfg.Metrics.BindAddress)
+		}
+
+		metricsServer := &http.Server{
+			Addr:    cfg.Metrics.BindAddress,
+			Handler: metricsMux,
+		}
+		go func() {
+			logger.Info("metrics server starting", "address", cfg.Metrics.BindAddress)
+			if err := metricsServer.ListenAndServe(); err != http.ErrServerClosed {
+				logger.Error("metrics server error", "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			metricsServer.Shutdown(shutCtx)
+		}()
+	}
+
+	// Register expanded health handler
+	registerExpandedHealth(wsServer, droneManager, hub, udpListener, telemetryChan)
+
+	printBanner(logger, cfg)
+
 	sig := <-sigChan
-	logger.Info("Received shutdown signal", "signal", sig)
+	logger.Info("received shutdown signal", "signal", sig)
 
-	// Initiate graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	// Cancel main context to stop all components
+	// Graceful shutdown: stop UDP -> drain workers -> flush WS -> close WS -> stop HTTP
 	cancel()
 
-	// Give components time to drain
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Shutdown.Timeout)
+	defer shutdownCancel()
+
 	<-shutdownCtx.Done()
 
-	// Stop components in reverse order
 	wsServer.Stop()
 	hub.Stop()
 	droneManager.Stop()
 
-	// Print final statistics
 	printStats(logger, droneManager, hub, udpListener)
-
-	logger.Info("Server shutdown complete")
+	logger.Info("server shutdown complete")
 }
 
-// eventProcessor routes telemetry events to the drone manager.
-// This runs in its own goroutine to decouple the ingest pipeline from state management.
+// registerExpandedHealth replaces the basic health handler with an expanded one.
+func registerExpandedHealth(
+	ws *broadcast.WebSocketServer,
+	mgr *drone.Manager,
+	hub *pubsub.Hub,
+	listener *ingest.UDPListener,
+	telemetryChan chan *protocol.TelemetryEvent,
+) {
+	ws.RegisterHandler("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		stats := mgr.Stats()
+		hubStats := hub.Stats()
+		listenerStats := listener.Stats()
+
+		var memStats runtime.MemStats
+		runtime.ReadMemStats(&memStats)
+
+		resp := ExpandedHealthResponse{
+			Status:    "ok",
+			Version:   version,
+			Timestamp: time.Now().UnixMilli(),
+			Uptime:    time.Since(startTime).Seconds(),
+			Components: ComponentHealth{
+				UDP: UDPHealth{
+					PacketsReceived: listenerStats.PacketsReceived,
+					PacketsDropped:  listenerStats.PacketsDropped,
+					ParseErrors:     listenerStats.ParseErrors,
+				},
+				Drones: DroneHealth{
+					Total:     stats.TotalDrones,
+					Connected: stats.ConnectedDrones,
+					Armed:     stats.ArmedDrones,
+					Messages:  stats.TotalMessages,
+				},
+				PubSub: PubSubHealth{
+					Subscribers:     hubStats.Subscribers,
+					EventsReceived:  hubStats.EventsReceived,
+					EventsBroadcast: hubStats.EventsBroadcast,
+					EventsDropped:   hubStats.EventsDropped,
+				},
+				WebSocket: WSHealth{
+					Clients: ws.ClientCount(),
+				},
+			},
+			System: SystemHealth{
+				Goroutines:     runtime.NumGoroutine(),
+				HeapAllocMB:    float64(memStats.HeapAlloc) / (1024 * 1024),
+				TelemetryChanUtil: float64(len(telemetryChan)) / float64(cap(telemetryChan)),
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+}
+
+var startTime = time.Now()
+
 func eventProcessor(
 	ctx context.Context,
 	events <-chan *protocol.TelemetryEvent,
@@ -198,7 +269,6 @@ func runEventProcessor(
 	}
 }
 
-// configureLogger creates a structured logger based on settings.
 func configureLogger(level, format string) *slog.Logger {
 	var logLevel slog.Level
 	switch level {
@@ -212,9 +282,7 @@ func configureLogger(level, format string) *slog.Logger {
 		logLevel = slog.LevelInfo
 	}
 
-	opts := &slog.HandlerOptions{
-		Level: logLevel,
-	}
+	opts := &slog.HandlerOptions{Level: logLevel}
 
 	var handler slog.Handler
 	if format == "json" {
@@ -226,39 +294,65 @@ func configureLogger(level, format string) *slog.Logger {
 	return slog.New(handler)
 }
 
-// printBanner prints the startup banner.
-func printBanner(logger *slog.Logger, udpAddr, httpAddr string) {
-	banner := `
-╔═══════════════════════════════════════════════════════════╗
-║         DRONE TELEMETRY AGGREGATOR                        ║
-║         High-Performance MAVLink Server                   ║
-╠═══════════════════════════════════════════════════════════╣
-║  UDP Ingest:  %-43s ║
-║  HTTP/WS:     %-43s ║
-╚═══════════════════════════════════════════════════════════╝
-`
-	// Log individual lines for structured logging compatibility
-	logger.Info("=== DRONE TELEMETRY AGGREGATOR ===")
-	logger.Info("Server ready",
-		"udp_ingest", udpAddr,
-		"http_api", httpAddr,
-	)
-	logger.Info("Press Ctrl+C to shutdown")
+// Expanded health response types
 
-	// Also print banner to stdout for interactive use
-	os.Stdout.WriteString("\n")
-	os.Stdout.WriteString("╔═══════════════════════════════════════════════════════════╗\n")
-	os.Stdout.WriteString("║         DRONE TELEMETRY AGGREGATOR                        ║\n")
-	os.Stdout.WriteString("║         High-Performance MAVLink Server                   ║\n")
-	os.Stdout.WriteString("╠═══════════════════════════════════════════════════════════╣\n")
-	os.Stdout.WriteString("║  UDP:  " + udpAddr + "                                           ║\n")
-	os.Stdout.WriteString("║  HTTP: " + httpAddr + "                                           ║\n")
-	os.Stdout.WriteString("╚═══════════════════════════════════════════════════════════╝\n\n")
-
-	_ = banner // Suppress unused warning
+type ExpandedHealthResponse struct {
+	Status     string          `json:"status"`
+	Version    string          `json:"version"`
+	Timestamp  int64           `json:"timestamp"`
+	Uptime     float64         `json:"uptime_seconds"`
+	Components ComponentHealth `json:"components"`
+	System     SystemHealth    `json:"system"`
 }
 
-// printStats prints final statistics on shutdown.
+type ComponentHealth struct {
+	UDP       UDPHealth    `json:"udp"`
+	Drones    DroneHealth  `json:"drones"`
+	PubSub    PubSubHealth `json:"pubsub"`
+	WebSocket WSHealth     `json:"websocket"`
+}
+
+type UDPHealth struct {
+	PacketsReceived uint64 `json:"packets_received"`
+	PacketsDropped  uint64 `json:"packets_dropped"`
+	ParseErrors     uint64 `json:"parse_errors"`
+}
+
+type DroneHealth struct {
+	Total     int    `json:"total"`
+	Connected int    `json:"connected"`
+	Armed     int    `json:"armed"`
+	Messages  uint64 `json:"messages"`
+}
+
+type PubSubHealth struct {
+	Subscribers     int    `json:"subscribers"`
+	EventsReceived  uint64 `json:"events_received"`
+	EventsBroadcast uint64 `json:"events_broadcast"`
+	EventsDropped   uint64 `json:"events_dropped"`
+}
+
+type WSHealth struct {
+	Clients int `json:"clients"`
+}
+
+type SystemHealth struct {
+	Goroutines        int     `json:"goroutines"`
+	HeapAllocMB       float64 `json:"heap_alloc_mb"`
+	TelemetryChanUtil float64 `json:"telemetry_chan_utilization"`
+}
+
+func printBanner(logger *slog.Logger, cfg config.Config) {
+	logger.Info("=== DRONE TELEMETRY AGGREGATOR ===")
+	logger.Info("server ready",
+		"udp_ingest", cfg.UDP.BindAddress,
+		"http_api", cfg.WebSocket.BindAddress,
+	)
+	if cfg.Metrics.Enabled {
+		logger.Info("metrics endpoint", "address", cfg.Metrics.BindAddress+"/metrics")
+	}
+}
+
 func printStats(
 	logger *slog.Logger,
 	manager *drone.Manager,
@@ -269,7 +363,7 @@ func printStats(
 	hubStats := hub.Stats()
 	listenerStats := listener.Stats()
 
-	logger.Info("Final Statistics",
+	logger.Info("final statistics",
 		"total_drones", managerStats.TotalDrones,
 		"connected_drones", managerStats.ConnectedDrones,
 		"armed_drones", managerStats.ArmedDrones,
