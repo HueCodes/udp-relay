@@ -1,0 +1,33 @@
+[Unit]
+Description=Drone Telemetry Aggregator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=drone-server
+Group=drone-server
+ExecStart=/usr/local/bin/drone-server -config /etc/drone-server/config.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+CPUQuota=200%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/drone-server
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drone-server
+
+[Install]
+WantedBy=multi-user.target
