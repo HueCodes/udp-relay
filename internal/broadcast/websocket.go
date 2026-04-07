@@ -72,6 +72,12 @@ func (c *wsClient) matchesDrone(id uint8) bool {
 	return c.droneIDs[id]
 }
 
+func (c *wsClient) hasFilter() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.droneIDs) > 0
+}
+
 // NewWebSocketServer creates a new WebSocket server.
 func NewWebSocketServer(
 	cfg config.WebSocketConfig,
@@ -235,7 +241,7 @@ func (ws *WebSocketServer) broadcastUpdates(events []*protocol.TelemetryEvent) {
 
 	for _, c := range ws.clients {
 		// Check if client has drone filters
-		if len(c.droneIDs) > 0 {
+		if c.hasFilter() {
 			filtered := make([]drone.Summary, 0, len(summaries))
 			for _, s := range summaries {
 				if c.matchesDrone(s.SystemID) {

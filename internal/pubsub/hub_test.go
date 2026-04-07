@@ -97,6 +97,38 @@ func TestBroadcastToMultipleSubscribers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Broadcast with blocking mode (non-drop)
+// ---------------------------------------------------------------------------
+
+func TestBroadcastBlockingMode(t *testing.T) {
+	cfg := config.PubSubConfig{
+		SubscriberBufferSize: 16,
+		DropOnSlowSubscriber: false,
+	}
+	input := make(chan *protocol.TelemetryEvent, 10)
+	hub := NewHub(cfg, input, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub.Start(ctx)
+
+	sub := hub.Subscribe("blocking")
+
+	event := testEvent(99)
+	input <- event
+
+	select {
+	case got := <-sub.Events:
+		if got.MessageID != 99 {
+			t.Errorf("expected MessageID 99, got %d", got.MessageID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event in blocking mode")
+	}
+
+	hub.Stop()
+}
+
+// ---------------------------------------------------------------------------
 // 3. Slow subscriber: events dropped when buffer full
 // ---------------------------------------------------------------------------
 

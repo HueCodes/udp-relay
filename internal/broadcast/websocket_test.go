@@ -211,6 +211,200 @@ func TestWebSocket_ConnectDisconnect(t *testing.T) {
 	mgr.Stop()
 }
 
+func TestMatchesDrone(t *testing.T) {
+	c := &wsClient{
+		id:       1,
+		messages: make(chan []byte, 1),
+	}
+
+	// No filter: matches everything
+	if !c.matchesDrone(1) {
+		t.Error("no filter should match all drones")
+	}
+	if !c.matchesDrone(99) {
+		t.Error("no filter should match all drones")
+	}
+
+	// With filter
+	c.mu.Lock()
+	c.droneIDs = map[uint8]bool{1: true, 5: true}
+	c.mu.Unlock()
+
+	if !c.matchesDrone(1) {
+		t.Error("drone 1 should match filter")
+	}
+	if !c.matchesDrone(5) {
+		t.Error("drone 5 should match filter")
+	}
+	if c.matchesDrone(2) {
+		t.Error("drone 2 should not match filter")
+	}
+}
+
+func TestBroadcastUpdates_WithFilter(t *testing.T) {
+	ws, mgr, hub, _ := testSetup()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+	hub.Start(ctx)
+
+	// Register two drones
+	mgr.ProcessEvent(&protocol.TelemetryEvent{
+		DroneID: protocol.DroneID{SystemID: 1, ComponentID: 1}, Timestamp: time.Now(),
+		Payload: &protocol.Heartbeat{Type: protocol.MAVTypeQuadrotor},
+	})
+	mgr.ProcessEvent(&protocol.TelemetryEvent{
+		DroneID: protocol.DroneID{SystemID: 2, ComponentID: 1}, Timestamp: time.Now(),
+		Payload: &protocol.Heartbeat{Type: protocol.MAVTypeFixedWing},
+	})
+
+	// Add a client with filter for drone 1 only
+	filteredClient := &wsClient{
+		id:       1,
+		messages: make(chan []byte, 10),
+		droneIDs: map[uint8]bool{1: true},
+	}
+	// Add an unfiltered client
+	unfilteredClient := &wsClient{
+		id:       2,
+		messages: make(chan []byte, 10),
+	}
+
+	ws.mu.Lock()
+	ws.clients[1] = filteredClient
+	ws.clients[2] = unfilteredClient
+	ws.mu.Unlock()
+
+	ws.broadcastUpdates([]*protocol.TelemetryEvent{{}})
+
+	// Check filtered client got only drone 1
+	select {
+	case data := <-filteredClient.messages:
+		var msg BroadcastMessage
+		json.Unmarshal(data, &msg)
+		if len(msg.Drones) != 1 {
+			t.Errorf("filtered client got %d drones, want 1", len(msg.Drones))
+		}
+		if len(msg.Drones) > 0 && msg.Drones[0].SystemID != 1 {
+			t.Errorf("filtered client got drone %d, want 1", msg.Drones[0].SystemID)
+		}
+	default:
+		t.Error("filtered client got no message")
+	}
+
+	// Check unfiltered client got both drones
+	select {
+	case data := <-unfilteredClient.messages:
+		var msg BroadcastMessage
+		json.Unmarshal(data, &msg)
+		if len(msg.Drones) != 2 {
+			t.Errorf("unfiltered client got %d drones, want 2", len(msg.Drones))
+		}
+	default:
+		t.Error("unfiltered client got no message")
+	}
+
+	hub.Stop()
+	mgr.Stop()
+}
+
+func TestBroadcastUpdates_SlowClientDrop(t *testing.T) {
+	ws, mgr, hub, _ := testSetup()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+	hub.Start(ctx)
+
+	mgr.ProcessEvent(&protocol.TelemetryEvent{
+		DroneID: protocol.DroneID{SystemID: 1, ComponentID: 1}, Timestamp: time.Now(),
+		Payload: &protocol.Heartbeat{},
+	})
+
+	// Client with full message buffer (size 0 means immediately full)
+	slowClient := &wsClient{
+		id:       1,
+		messages: make(chan []byte), // unbuffered = always blocks
+	}
+	ws.mu.Lock()
+	ws.clients[1] = slowClient
+	ws.mu.Unlock()
+
+	// Should not block or panic
+	ws.broadcastUpdates([]*protocol.TelemetryEvent{{}})
+
+	hub.Stop()
+	mgr.Stop()
+}
+
+func TestWebSocket_SubscribeFilter(t *testing.T) {
+	ws, mgr, hub, telemetryChan := testSetup()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+	hub.Start(ctx)
+
+	srv := httptest.NewServer(ws.mux)
+	defer srv.Close()
+
+	ws.wg.Add(1)
+	go ws.broadcastLoop(ctx)
+
+	// Register drones
+	mgr.ProcessEvent(&protocol.TelemetryEvent{
+		DroneID: protocol.DroneID{SystemID: 1, ComponentID: 1}, Timestamp: time.Now(),
+		Payload: &protocol.Heartbeat{Type: protocol.MAVTypeQuadrotor},
+	})
+	mgr.ProcessEvent(&protocol.TelemetryEvent{
+		DroneID: protocol.DroneID{SystemID: 2, ComponentID: 1}, Timestamp: time.Now(),
+		Payload: &protocol.Heartbeat{Type: protocol.MAVTypeFixedWing},
+	})
+
+	wsURL := "ws" + srv.URL[4:] + "/ws"
+	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+
+	// Send subscribe message to filter to drone 1 only
+	subMsg := SubscribeMessage{DroneIDs: []uint8{1}}
+	subData, _ := json.Marshal(subMsg)
+	err = c.Write(ctx, websocket.MessageText, subData)
+	if err != nil {
+		t.Fatalf("websocket write subscribe: %v", err)
+	}
+
+	// Give time for subscribe to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	// Push a telemetry event to trigger broadcast
+	telemetryChan <- &protocol.TelemetryEvent{
+		DroneID: protocol.DroneID{SystemID: 1, ComponentID: 1}, Timestamp: time.Now(),
+		Payload: &protocol.Heartbeat{},
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readCancel()
+	_, data, err := c.Read(readCtx)
+	if err != nil {
+		t.Fatalf("websocket read: %v", err)
+	}
+
+	var msg BroadcastMessage
+	json.Unmarshal(data, &msg)
+	if len(msg.Drones) != 1 {
+		t.Errorf("filtered WS got %d drones, want 1", len(msg.Drones))
+	}
+	if len(msg.Drones) > 0 && msg.Drones[0].SystemID != 1 {
+		t.Errorf("filtered WS got drone %d, want 1", msg.Drones[0].SystemID)
+	}
+
+	c.Close(websocket.StatusNormalClosure, "")
+	hub.Stop()
+	mgr.Stop()
+}
+
 func TestWebSocket_MaxClients(t *testing.T) {
 	ws, mgr, hub, _ := testSetup()
 	// Set max clients to 2
