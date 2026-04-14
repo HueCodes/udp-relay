@@ -371,22 +371,31 @@ func (wp *WorkerPool) processPacket(pkt *Packet) {
 	}
 }
 
-// tokenBucket implements a simple token bucket rate limiter.
+// tokenBucket implements a simple token bucket rate limiter with per-drone stats.
 type tokenBucket struct {
 	mu       sync.Mutex
 	tokens   float64
 	max      float64
 	rate     float64 // tokens per nanosecond
 	lastTime int64   // UnixNano
+
+	// Per-drone stats
+	drops         uint64
+	windowStart   int64
+	windowPackets uint64
+	lastRate      float64
+	noisyCount    uint64
 }
 
 func newTokenBucket(perSecond int, burst int) *tokenBucket {
+	now := time.Now().UnixNano()
 	max := float64(perSecond + burst)
 	return &tokenBucket{
-		tokens:   max,
-		max:      max,
-		rate:     float64(perSecond) / 1e9,
-		lastTime: time.Now().UnixNano(),
+		tokens:      max,
+		max:         max,
+		rate:        float64(perSecond) / 1e9,
+		lastTime:    now,
+		windowStart: now,
 	}
 }
 
@@ -403,6 +412,27 @@ func (wp *WorkerPool) checkRateLimit(systemID uint8) bool {
 	elapsed := now - bucket.lastTime
 	bucket.lastTime = now
 
+	// Track packet rate for this drone
+	bucket.windowPackets++
+	windowElapsed := now - bucket.windowStart
+	if windowElapsed >= 1e9 { // 1 second window
+		bucket.lastRate = float64(bucket.windowPackets) * 1e9 / float64(windowElapsed)
+		bucket.windowPackets = 0
+		bucket.windowStart = now
+
+		// Detect noisy drones (>5x rate limit)
+		if bucket.lastRate > float64(wp.rateLimit)*5 {
+			bucket.noisyCount++
+			if bucket.noisyCount == 1 || bucket.noisyCount%10 == 0 {
+				wp.logger.Warn("noisy drone detected",
+					"system_id", systemID,
+					"rate", bucket.lastRate,
+					"limit", wp.rateLimit,
+					"detections", bucket.noisyCount)
+			}
+		}
+	}
+
 	// Refill tokens
 	bucket.tokens += float64(elapsed) * bucket.rate
 	if bucket.tokens > bucket.max {
@@ -410,6 +440,7 @@ func (wp *WorkerPool) checkRateLimit(systemID uint8) bool {
 	}
 
 	if bucket.tokens < 1 {
+		bucket.drops++
 		return false
 	}
 	bucket.tokens--

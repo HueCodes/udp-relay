@@ -81,6 +81,8 @@ func (ws *WebSocketServer) handleDroneRoutes(w http.ResponseWriter, r *http.Requ
 		} else {
 			ws.handleHistory(w, r, systemID)
 		}
+	case "stats":
+		ws.handleDroneStats(w, r, systemID)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -135,6 +137,40 @@ func (ws *WebSocketServer) handleHistoryExport(w http.ResponseWriter, r *http.Re
 	default:
 		http.Error(w, "unsupported format", http.StatusBadRequest)
 	}
+}
+
+func (ws *WebSocketServer) handleDroneStats(w http.ResponseWriter, _ *http.Request, systemID uint8) {
+	state := ws.droneManager.GetStateBySystemID(systemID)
+	if state == nil {
+		http.Error(w, "drone not found", http.StatusNotFound)
+		return
+	}
+
+	histLen := 0
+	if state.History != nil {
+		histLen = state.History.Len()
+	}
+
+	resp := struct {
+		SystemID     uint8   `json:"system_id"`
+		Connected    bool    `json:"connected"`
+		MessageCount uint64  `json:"message_count"`
+		HistorySize  int     `json:"history_entries"`
+		UptimeMs     int64   `json:"uptime_ms"`
+		Armed        bool    `json:"armed"`
+		FlightMode   string  `json:"flight_mode"`
+	}{
+		SystemID:     systemID,
+		Connected:    state.IsConnected,
+		MessageCount: state.MessageCount,
+		HistorySize:  histLen,
+		UptimeMs:     state.LastSeen.Sub(state.FirstSeen).Milliseconds(),
+		Armed:        state.IsArmed,
+		FlightMode:   state.FlightMode,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // GeoJSON types

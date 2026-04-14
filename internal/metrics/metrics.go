@@ -53,4 +53,24 @@ var (
 		Help:    "Latency from packet receive to state update",
 		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 15),
 	})
+
+	DronePacketsReceived = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "drone_packets_received_total",
+		Help: "Packets received per drone",
+	}, []string{"system_id"})
+
+	DronePacketsDropped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "drone_packets_dropped_total",
+		Help: "Packets dropped per drone (rate limited)",
+	}, []string{"system_id"})
+
+	DroneParseErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "drone_parse_errors_total",
+		Help: "Parse errors per source",
+	}, []string{"system_id"})
+
+	NoisyDroneDetections = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "noisy_drone_detections_total",
+		Help: "Times a drone exceeded the noisy threshold",
+	})
 )
