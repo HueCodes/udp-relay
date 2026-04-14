@@ -15,7 +15,7 @@ BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
 # Default target
-all: check build
+all: fmt vet test-race build
 
 ## build: Build the server binary
 build:

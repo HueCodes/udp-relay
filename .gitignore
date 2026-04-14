@@ -1,6 +1,9 @@
 # Build artifacts
 /build/
 /server
+/simulator
+/replay
+/tui
 *.exe
 *.exe~
 *.dll
