@@ -37,6 +37,28 @@ jobs:
             echo "Coverage ${total}% is below threshold ${threshold}%"
             exit 1
           fi
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run benchmarks
+        run: go test -bench=. -benchmem -run=^$ -count=3 ./... 2>&1 | tee bench.txt
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: bench.txt
 
   vet:
     runs-on: ubuntu-latest
@@ -55,6 +77,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build -ldflags="-s -w" ./cmd/server
+      - run: go build -ldflags="-s -w" ./cmd/simulator
+      - run: go build -ldflags="-s -w" ./cmd/replay
+      - run: go build -ldflags="-s -w" ./cmd/tui
 
   docker:
     runs-on: ubuntu-latest
