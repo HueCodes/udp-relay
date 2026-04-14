@@ -101,11 +101,19 @@ docker:
 	@echo "Building Docker image..."
 	docker build -t $(BINARY_NAME):$(VERSION) .
 
-## simulate: Run with simulated MAVLink traffic (for testing)
+## simulate: Run server with built-in traffic simulator
 simulate: build
-	@echo "Starting with simulated traffic..."
-	@echo "Note: Run 'make sim-traffic' in another terminal to generate packets"
-	$(BUILD_DIR)/$(BINARY_NAME) -log-level=debug
+	@echo "Starting server with simulated traffic..."
+	@$(BUILD_DIR)/$(BINARY_NAME) -log-level=debug & SERVER_PID=$$!; \
+	sleep 1; \
+	echo "Starting simulator (5 drones)..."; \
+	$(GO) run ./cmd/simulator -drones 5 -rate 10 & SIM_PID=$$!; \
+	trap "kill $$SERVER_PID $$SIM_PID 2>/dev/null" EXIT; \
+	wait $$SERVER_PID
+
+## tui: Run the terminal UI dashboard
+tui:
+	$(GO) run ./cmd/tui
 
 ## help: Show this help
 help:
