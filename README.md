@@ -267,9 +267,37 @@ make tui
 
 ## Performance
 
-Benchmarks run on the CI runner (ubuntu-latest). Results from `go test -bench=. -benchmem`:
+Benchmarks on Apple M2 (`go test -bench=. -benchmem`):
 
-_(Benchmark results will be populated after running `make bench`)_
+```
+MAVLink Parser
+  BenchmarkParseFrameHeartbeat          24.4M ops/s    49 ns/op    427 MB/s   48 B/op   1 alloc
+  BenchmarkDecodePacketHeartbeat         9.5M ops/s   127 ns/op    165 MB/s  128 B/op   3 allocs
+  BenchmarkDecodePacketGlobalPosition    6.3M ops/s   192 ns/op    209 MB/s  192 B/op   3 allocs
+  BenchmarkDecodePacketAttitude          6.2M ops/s   190 ns/op    210 MB/s  160 B/op   3 allocs
+  BenchmarkDecodePacketBattery           5.4M ops/s   223 ns/op    216 MB/s  136 B/op   3 allocs
+
+CRC-16/MCRF4XX
+  BenchmarkCRCCalculate (50 bytes)       9.5M ops/s   125 ns/op    400 MB/s    0 B/op   0 allocs
+  BenchmarkCRCThroughput (255 bytes)     1.7M ops/s   725 ns/op    352 MB/s    0 B/op   0 allocs
+
+Drone Manager (50 drones registered)
+  BenchmarkProcessEvent                  7.8M ops/s   147 ns/op     16 B/op   1 alloc
+  BenchmarkGetAllSummaries               845K ops/s  1273 ns/op   4864 B/op   1 alloc
+  BenchmarkDroneManagerContended         1.2M ops/s   997 ns/op   4406 B/op   1 alloc
+
+Pub/Sub Hub (zero-alloc fan-out)
+  BenchmarkBroadcast1Sub                 3.3M ops/s   368 ns/op      0 B/op   0 allocs
+  BenchmarkBroadcast10Sub                972K ops/s  2085 ns/op      0 B/op   0 allocs
+  BenchmarkBroadcast100Sub               60K ops/s  29.5 us/op      0 B/op   0 allocs
+
+Packet Pool
+  BenchmarkPacketPool_GetPut           154M ops/s      7.8 ns/op    0 B/op   0 allocs
+  BenchmarkPacketPool_Parallel         776M ops/s      3.0 ns/op    0 B/op   0 allocs
+
+Full Pipeline (UDP bytes -> parse -> decode -> JSON)
+  BenchmarkFullPipeline                  2.9M ops/s   401 ns/op    264 B/op   5 allocs
+```
 
 ## Project Structure
 

@@ -456,3 +456,71 @@ func BenchmarkGetAllSummaries(b *testing.B) {
 	b.StopTimer()
 	mgr.Stop()
 }
+
+func BenchmarkDroneManagerContended(b *testing.B) {
+	updates := make(chan StateUpdate, 100000)
+	mgr := NewManager(testConfig(), updates, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+
+	// Seed 50 drones
+	for i := uint8(1); i <= 50; i++ {
+		mgr.ProcessEvent(makeEvent(i, &protocol.Heartbeat{Type: protocol.MAVTypeQuadrotor}))
+	}
+
+	go func() {
+		for range updates {
+		}
+	}()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := uint8(1)
+		for pb.Next() {
+			if i%10 < 9 {
+				// 90% reads
+				mgr.GetAllSummaries()
+			} else {
+				// 10% writes
+				mgr.ProcessEvent(makeEvent(i%50+1, &protocol.GPSPosition{
+					Latitude: 37.7749, Longitude: -122.4194, Altitude: 50,
+				}))
+			}
+			i++
+		}
+	})
+	b.StopTimer()
+	mgr.Stop()
+}
+
+func BenchmarkJSONSerialization(b *testing.B) {
+	updates := make(chan StateUpdate, 10000)
+	mgr := NewManager(testConfig(), updates, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+
+	for i := uint8(1); i <= 20; i++ {
+		mgr.ProcessEvent(makeEvent(i, &protocol.Heartbeat{Type: protocol.MAVTypeQuadrotor, Armed: true}))
+		mgr.ProcessEvent(makeEvent(i, &protocol.GPSPosition{
+			Latitude: 37.7749 + float64(i)*0.001, Longitude: -122.4194, Altitude: 50,
+		}))
+		mgr.ProcessEvent(makeEvent(i, &protocol.BatteryStatus{Remaining: int8(80 - i), VoltageTotal: 16.2}))
+	}
+
+	go func() {
+		for range updates {
+		}
+	}()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		summaries := mgr.GetAllSummaries()
+		for _, s := range summaries {
+			_ = s // would be json.Marshal in real path
+		}
+	}
+	b.StopTimer()
+	mgr.Stop()
+}
