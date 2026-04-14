@@ -102,6 +102,7 @@ func NewWebSocketServer(
 	ws.mux.HandleFunc("/ws", ws.handleWebSocket)
 	ws.mux.HandleFunc("/api/drones", ws.handleDroneList)
 	ws.mux.HandleFunc("/api/health", ws.handleHealth)
+	ws.registerExportHandlers()
 
 	return ws
 }

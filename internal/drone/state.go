@@ -30,6 +30,9 @@ type State struct {
 	IsArmed     bool // Derived from heartbeat
 	FlightMode  string
 
+	// Historical state (ring buffer, not copied by Clone)
+	History *RingBuffer
+
 	// Statistics
 	MessageCount uint64
 }

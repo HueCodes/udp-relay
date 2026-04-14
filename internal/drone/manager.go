@@ -77,12 +77,17 @@ func (m *Manager) ProcessEvent(event *protocol.TelemetryEvent) {
 
 	if !exists {
 		// New drone registration
+		histSize := m.cfg.HistorySize
+		if histSize <= 0 {
+			histSize = 1000
+		}
 		state = &State{
 			ID:          event.DroneID,
 			SourceAddr:  event.SourceAddr,
 			FirstSeen:   now,
 			LastSeen:    now,
 			IsConnected: true,
+			History:     NewRingBuffer(histSize),
 		}
 		m.drones[event.DroneID] = state
 
@@ -140,6 +145,23 @@ func (m *Manager) ProcessEvent(event *protocol.TelemetryEvent) {
 
 	case *protocol.GPSPosition:
 		state.GPS = payload
+		// Record history entry
+		if state.History != nil {
+			entry := HistoryEntry{
+				Timestamp: now,
+				Lat:       payload.Latitude,
+				Lon:       payload.Longitude,
+				Alt:       payload.Altitude,
+				Heading:   payload.Heading,
+				Battery:   -1,
+				Armed:     state.IsArmed,
+				Mode:      state.FlightMode,
+			}
+			if state.Battery != nil {
+				entry.Battery = state.Battery.Remaining
+			}
+			state.History.Push(entry)
+		}
 
 	case *protocol.BatteryStatus:
 		state.Battery = payload
@@ -214,6 +236,34 @@ func (m *Manager) GetAllSummaries() []Summary {
 		summaries = append(summaries, state.ToSummary())
 	}
 	return summaries
+}
+
+// GetHistory returns the last n history entries for a drone identified by system ID.
+// Returns nil if the drone is not found.
+func (m *Manager) GetHistory(systemID uint8, n int) []HistoryEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for id, state := range m.drones {
+		if id.SystemID == systemID && state.History != nil {
+			return state.History.Last(n)
+		}
+	}
+	return nil
+}
+
+// GetStateBySystemID returns a copy of a drone's state by system ID.
+func (m *Manager) GetStateBySystemID(systemID uint8) *State {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for id, state := range m.drones {
+		if id.SystemID == systemID {
+			clone := state.Clone()
+			return &clone
+		}
+	}
+	return nil
 }
 
 // GetConnectedCount returns the number of connected drones.

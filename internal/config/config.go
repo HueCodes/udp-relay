@@ -44,6 +44,7 @@ type DroneConfig struct {
 	MaxMessagesPerSecond int           `yaml:"max_messages_per_second"`
 	RateLimitBurst       int           `yaml:"rate_limit_burst"`
 	RateLimitWindow      time.Duration `yaml:"rate_limit_window"`
+	HistorySize          int           `yaml:"history_size"`
 }
 
 // MAVLinkConfig contains MAVLink parsing settings.
@@ -101,6 +102,7 @@ func Default() Config {
 			MaxMessagesPerSecond: 200,
 			RateLimitBurst:       50,
 			RateLimitWindow:      time.Second,
+			HistorySize:          1000,
 		},
 		MAVLink: MAVLinkConfig{
 			ValidateCRC: true,

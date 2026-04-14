@@ -20,6 +20,7 @@ drone:
   max_messages_per_second: 200
   rate_limit_burst: 50
   rate_limit_window: 1s
+  history_size: 1000  # ring buffer entries per drone
 
 mavlink:
   validate_crc: true
